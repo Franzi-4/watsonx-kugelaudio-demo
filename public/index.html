@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>watsonx Orchestrate × KugelAudio - Voice AI Demo</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #0D1B2A 0%, #0F1B2E 100%);
+      color: #FFFFFF;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    /* Header */
+    header {
+      padding: 24px 32px;
+      border-bottom: 1px solid rgba(15, 98, 254, 0.2);
+      background: rgba(27, 40, 56, 0.5);
+      backdrop-filter: blur(10px);
+    }
+
+    .header-content {
+      max-width: 1400px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.5px;
+    }
+
+    .logo-text {
+      display: flex;
+      flex-direction: column;
+      line-height: 1.2;
+    }
+
+    .logo-main {
+      font-size: 18px;
+      color: #0F62FE;
+    }
+
+    .logo-sub {
+      font-size: 12px;
+      color: #00D6A1;
+      font-weight: 400;
+    }
+
+    .mode-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      background: rgba(15, 98, 254, 0.15);
+      border: 1px solid #0F62FE;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .mode-toggle:hover {
+      background: rgba(15, 98, 254, 0.25);
+    }
+
+    .mode-indicator {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #00D6A1;
+    }
+
+    .mode-indicator.demo {
+      background: #FFA500;
+    }
+
+    /* Main Content */
+    main {
+      flex: 1;
+      max-width: 1400px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 32px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 32px;
+    }
+
+    @media (max-width: 1024px) {
+      main {
+        grid-template-columns: 1fr;
+        gap: 24px;
+      }
+    }
+
+    /* Cards */
+    .card {
+      background: linear-gradient(135deg, #1B2838 0%, #162031 100%);
+      border: 1px solid rgba(15, 98, 254, 0.2);
+      border-radius: 12px;
+      padding: 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(15, 98, 254, 0.5), transparent);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .card:hover::before {
+      opacity: 1;
+    }
+
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #00D6A1;
+      opacity: 0.8;
+    }
+
+    /* Voice Input Section */
+    .voice-input-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+      text-align: center;
+    }
+
+    .mic-button {
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #0F62FE 0%, #0353E9 100%);
+      border: 3px solid #0F62FE;
+      color: white;
+      font-size: 48px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s ease;
+      position: relative;
+      box-shadow: 0 0 0 0 rgba(15, 98, 254, 0.7);
+      user-select: none;
+    }
+
+    .mic-button:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 0 8px rgba(15, 98, 254, 0.3);
+    }
+
+    .mic-button.recording {
+      animation: pulse 1.5s infinite;
+      background: linear-gradient(135deg, #FF5733 0%, #E63946 100%);
+      border-color: #FF5733;
+      box-shadow: 0 0 0 0 rgba(255, 87, 51, 0.7);
+    }
+
+    @keyframes pulse {
+      0% {
+        box-shadow: 0 0 0 0 rgba(255, 87, 51, 0.7);
+      }
+      70% {
+        box-shadow: 0 0 0 20px rgba(255, 87, 51, 0);
+      }
+      100% {
+        box-shadow: 0 0 0 0 rgba(255, 87, 51, 0);
+      }
+    }
+
+    .mic-status {
+      font-size: 14px;
+      color: #00D6A1;
+      font-weight: 500;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .mic-status.recording {
+      color: #FF5733;
+    }
+
+    /* Waveform */
+    .waveform-container {
+      width: 100%;
+      height: 60px;
+      background: rgba(15, 98, 254, 0.1);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      border: 1px solid rgba(15, 98, 254, 0.2);
+    }
+
+    #waveform {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Language Detection Badge */
+    .language-badge {
+      display: inline-block;
+      padding: 8px 16px;
+      background: rgba(0, 214, 161, 0.15);
+      border: 1px solid #00D6A1;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 500;
+      color: #00D6A1;
+      opacity: 0;
+      transition: all 0.3s ease;
+    }
+
+    .language-badge.active {
+      opacity: 1;
+    }
+
+    /* Transcription Area */
+    .transcription-area {
+      background: rgba(15, 98, 254, 0.08);
+      border: 1px solid rgba(15, 98, 254, 0.2);
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 80px;
+      font-size: 15px;
+      line-height: 1.6;
+      color: #E0E0E0;
+      word-wrap: break-word;
+      white-space: pre-wrap;
+    }
+
+    .transcription-area.empty {
+      color: rgba(255, 255, 255, 0.4);
+      font-style: italic;
+    }
+
+    /* Agent Response Section */
+    .agent-response-section {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .agent-info {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .agent-avatar {
+      width: 60px;
+      height: 60px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #0F62FE 0%, #00D6A1 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      flex-shrink: 0;
+      box-shadow: 0 4px 12px rgba(15, 98, 254, 0.3);
+    }
+
+    .agent-details {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .agent-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: #FFFFFF;
+    }
+
+    .agent-status {
+      font-size: 12px;
+      color: #00D6A1;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .status-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #00D6A1;
+      animation: none;
+    }
+
+    .status-dot.thinking {
+      animation: thinking 1.5s infinite;
+    }
+
+    @keyframes thinking {
+      0%, 100% {
+        opacity: 0.3;
+      }
+      50% {
+        opacity: 1;
+      }
+    }
+
+    /* Response Text Area */
+    .response-area {
+      background: rgba(0, 214, 161, 0.08);
+      border: 1px solid rgba(0, 214, 161, 0.2);
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 100px;
+      font-size: 15px;
+      line-height: 1.6;
+      color: #E0E0E0;
+      word-wrap: break-word;
+      white-space: pre-wrap;
+    }
+
+    .response-area.empty {
+      color: rgba(255, 255, 255, 0.4);
+      font-style: italic;
+    }
+
+    /* Playback Button */
+    .playback-button {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      background: linear-gradient(135deg, #00D6A1 0%, #00C488 100%);
+      border: none;
+      border-radius: 6px;
+      color: #0D1B2A;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      width: fit-content;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .playback-button:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 16px rgba(0, 214, 161, 0.3);
+    }
+
+    .playback-button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* Stats */
+    .stats-container {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      padding: 16px;
+      background: rgba(15, 98, 254, 0.1);
+      border-radius: 8px;
+      border: 1px solid rgba(15, 98, 254, 0.2);
+    }
+
+    @media (max-width: 768px) {
+      .stats-container {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    .stat {
+      text-align: center;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      color: #00D6A1;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .stat-value {
+      font-size: 16px;
+      font-weight: 600;
+      color: #FFFFFF;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Language Selector */
+    .language-selector {
+      display: flex;
+      gap: 12px;
+      padding: 20px;
+      background: rgba(27, 40, 56, 0.5);
+      border-top: 1px solid rgba(15, 98, 254, 0.2);
+      border-bottom: 1px solid rgba(15, 98, 254, 0.2);
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .language-btn {
+      padding: 8px 12px;
+      background: transparent;
+      border: 1.5px solid rgba(15, 98, 254, 0.3);
+      border-radius: 6px;
+      color: #FFFFFF;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+
+    .language-btn:hover {
+      border-color: #0F62FE;
+      background: rgba(15, 98, 254, 0.1);
+    }
+
+    .language-btn.active {
+      background: #0F62FE;
+      border-color: #0F62FE;
+      color: #FFFFFF;
+    }
+
+    /* Footer */
+    footer {
+      padding: 20px 32px;
+      background: rgba(27, 40, 56, 0.5);
+      border-top: 1px solid rgba(15, 98, 254, 0.2);
+      text-align: center;
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .footer-separator {
+      width: 1px;
+      height: 16px;
+      background: rgba(15, 98, 254, 0.2);
+    }
+
+    .footer-text {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* Animations */
+    .fade-in {
+      animation: fadeIn 0.3s ease-in;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(-4px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .typing-dots::after {
+      content: '';
+      animation: typingDots 1.5s infinite;
+    }
+
+    @keyframes typingDots {
+      0%, 20% {
+        content: '';
+      }
+      40% {
+        content: '.';
+      }
+      60% {
+        content: '..';
+      }
+      80%, 100% {
+        content: '...';
+      }
+    }
+
+    /* Error State */
+    .error-message {
+      padding: 12px 16px;
+      background: rgba(255, 87, 51, 0.15);
+      border: 1px solid #FF5733;
+      border-radius: 6px;
+      color: #FF9999;
+      font-size: 12px;
+      display: none;
+    }
+
+    .error-message.active {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header>
+    <div class="header-content">
+      <div class="logo">
+        <div class="logo-text">
+          <div class="logo-main">watsonx × KugelAudio</div>
+          <div class="logo-sub">Multilingual Voice AI 🇪🇺</div>
+        </div>
+      </div>
+      <div class="mode-toggle" id="modeToggle">
+        <span class="mode-indicator demo" id="modeIndicator"></span>
+        <span id="modeText">Demo Mode</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main>
+    <!-- Left Column: Voice Input -->
+    <div class="card">
+      <h2 class="card-title">Voice Input</h2>
+
+      <div class="voice-input-section">
+        <button class="mic-button" id="micButton" title="Click to start recording">🎤</button>
+        <div class="mic-status" id="micStatus">Click to speak</div>
+        <div class="language-badge" id="languageBadge"></div>
+      </div>
+
+      <div class="waveform-container">
+        <canvas id="waveform"></canvas>
+      </div>
+
+      <div class="transcription-area empty" id="transcriptionArea">Waiting for speech...</div>
+
+      <div id="errorMessage" class="error-message"></div>
+    </div>
+
+    <!-- Right Column: Agent Response -->
+    <div class="card">
+      <h2 class="card-title">Agent Response</h2>
+
+      <div class="agent-info">
+        <div class="agent-avatar">🤖</div>
+        <div class="agent-details">
+          <div class="agent-name">Customer Service Agent</div>
+          <div class="agent-status">
+            <span class="status-dot" id="statusDot">●</span>
+            <span id="statusText">Ready</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="response-area empty" id="responseArea">Waiting for input...</div>
+
+      <button class="playback-button" id="playbackButton" disabled>
+        <span>🔊</span> Play Response
+      </button>
+
+      <div class="stats-container">
+        <div class="stat">
+          <div class="stat-label">STT</div>
+          <div class="stat-value" id="sttTime">0ms</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Agent</div>
+          <div class="stat-value" id="agentTime">0ms</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">TTS</div>
+          <div class="stat-value" id="ttsTime">0ms</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Total</div>
+          <div class="stat-value" id="totalTime">0ms</div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Language Selector -->
+  <div class="language-selector">
+    <button class="language-btn active" data-lang="en">🇬🇧 EN</button>
+    <button class="language-btn" data-lang="de">🇩🇪 DE</button>
+    <button class="language-btn" data-lang="fr">🇫🇷 FR</button>
+    <button class="language-btn" data-lang="es">🇪🇸 ES</button>
+    <button class="language-btn" data-lang="it">🇮🇹 IT</button>
+    <button class="language-btn" data-lang="nl">🇳🇱 NL</button>
+    <button class="language-btn" data-lang="pl">🇵🇱 PL</button>
+    <button class="language-btn" data-lang="pt">🇵🇹 PT</button>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <span class="footer-text">Powered by IBM watsonx Orchestrate + KugelAudio</span>
+    <div class="footer-separator"></div>
+    <span class="footer-text">100% EU Infrastructure</span>
+    <div class="footer-separator"></div>
+    <span class="footer-text">GDPR Compliant</span>
+    <div class="footer-separator"></div>
+    <span class="footer-text">39ms Latency</span>
+  </footer>
+
+  <script>
+    // Demo mode data
+    const demoData = {
+      en: {
+        question: "Where is my order?",
+        response: "Your order #4521 is on its way and will be delivered tomorrow between 9 AM and 12 PM."
+      },
+      de: {
+        question: "Wo ist meine Bestellung?",
+        response: "Ihre Bestellung #4521 ist unterwegs und wird morgen zwischen 9 und 12 Uhr zugestellt."
+      },
+      fr: {
+        question: "Où est ma commande?",
+        response: "Votre commande #4521 est en cours de livraison et arrivera demain entre 9h et 12h."
+      },
+      es: {
+        question: "¿Dónde está mi pedido?",
+        response: "Su pedido #4521 está en camino y será entregado mañana entre las 9 y las 12."
+      },
+      it: {
+        question: "Dov'è il mio ordine?",
+        response: "Il suo ordine #4521 è in transito e verrà consegnato domani tra le 9 e le 12."
+      },
+      nl: {
+        question: "Waar is mijn bestelling?",
+        response: "Uw bestelling #4521 is onderweg en wordt morgen tussen 9 en 12 uur bezorgd."
+      },
+      pl: {
+        question: "Gdzie jest moje zamówienie?",
+        response: "Twoje zamówienie #4521 jest w drodze i zostanie dostarczone jutro między 9 a 12."
+      },
+      pt: {
+        question: "Onde está meu pedido?",
+        response: "Seu pedido #4521 está a caminho e será entregue amanhã entre 9h e 12h."
+      }
+    };
+
+    const languageNames = {
+      en: "English",
+      de: "German",
+      fr: "French",
+      es: "Spanish",
+      it: "Italian",
+      nl: "Dutch",
+      pl: "Polish",
+      pt: "Portuguese"
+    };
+
+    // State
+    let isRecording = false;
+    let currentLanguage = 'en';
+    let isLiveMode = false;
+    let audioContext = null;
+    let analyser = null;
+    let microphone = null;
+    let scriptProcessor = null;
+    let animationId = null;
+
+    // DOM Elements
+    const micButton = document.getElementById('micButton');
+    const micStatus = document.getElementById('micStatus');
+    const transcriptionArea = document.getElementById('transcriptionArea');
+    const responseArea = document.getElementById('responseArea');
+    const languageBadge = document.getElementById('languageBadge');
+    const playbackButton = document.getElementById('playbackButton');
+    const waveformCanvas = document.getElementById('waveform');
+    const modeToggle = document.getElementById('modeToggle');
+    const modeText = document.getElementById('modeText');
+    const modeIndicator = document.getElementById('modeIndicator');
+    const errorMessage = document.getElementById('errorMessage');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+
+    // Canvas setup
+    const ctx = waveformCanvas.getContext('2d');
+    waveformCanvas.width = waveformCanvas.offsetWidth;
+    waveformCanvas.height = waveformCanvas.offsetHeight;
+
+    // Check live mode on startup
+    async function checkLiveMode() {
+      try {
+        const response = await fetch('/api/health');
+        if (response.ok) {
+          const data = await response.json();
+          if (data.status === 'healthy') {
+            isLiveMode = true;
+            modeIndicator.classList.remove('demo');
+            modeText.textContent = 'Live Mode';
+          }
+        }
+      } catch (error) {
+        console.log('Demo mode active - API unreachable');
+      }
+    }
+
+    // Waveform animation
+    let waveTime = 0;
+    function drawWaveform() {
+      ctx.fillStyle = 'rgba(15, 98, 254, 0.1)';
+      ctx.fillRect(0, 0, waveformCanvas.width, waveformCanvas.height);
+
+      ctx.strokeStyle = '#0F62FE';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+
+      const amplitude = isRecording ? 15 : 5;
+      const frequency = isRecording ? 0.08 : 0.03;
+
+      for (let i = 0; i < waveformCanvas.width; i++) {
+        const y = waveformCanvas.height / 2 + Math.sin((i + waveTime) * frequency) * amplitude;
+        if (i === 0) ctx.moveTo(i, y);
+        else ctx.lineTo(i, y);
+      }
+
+      ctx.stroke();
+      waveTime += isRecording ? 2 : 1;
+      animationId = requestAnimationFrame(drawWaveform);
+    }
+
+    // Mic button handler
+    micButton.addEventListener('click', async () => {
+      if (!isRecording) {
+        startRecording();
+      } else {
+        stopRecording();
+      }
+    });
+
+    async function startRecording() {
+      try {
+        isRecording = true;
+        micButton.classList.add('recording');
+        micStatus.classList.add('recording');
+        micStatus.textContent = 'Listening...';
+        transcriptionArea.classList.add('empty');
+        transcriptionArea.textContent = '';
+        errorMessage.classList.remove('active');
+
+        if (isLiveMode) {
+          try {
+            audioContext = audioContext || new (window.AudioContext || window.webkitAudioContext)();
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            microphone = audioContext.createMediaStreamSource(stream);
+            analyser = audioContext.createAnalyser();
+            microphone.connect(analyser);
+
+            // Simulate real recording with timeout
+            setTimeout(() => {
+              stopRecording();
+            }, 3000);
+          } catch (err) {
+            console.error('Microphone error:', err);
+            isLiveMode = false;
+            simulateRecording();
+          }
+        } else {
+          simulateRecording();
+        }
+      } catch (error) {
+        console.error('Recording error:', error);
+        showError('Microphone access denied');
+        stopRecording();
+      }
+    }
+
+    function simulateRecording() {
+      setTimeout(() => {
+        const data = demoData[currentLanguage];
+        transcriptionArea.textContent = data.question;
+        transcriptionArea.classList.remove('empty');
+        languageBadge.textContent = `🗣️ ${languageNames[currentLanguage]} detected`;
+        languageBadge.classList.add('active');
+
+        stopRecording();
+        processResponse(data);
+      }, 3000);
+    }
+
+    function stopRecording() {
+      isRecording = false;
+      micButton.classList.remove('recording');
+      micStatus.classList.remove('recording');
+      micStatus.textContent = 'Click to speak';
+
+      if (microphone) {
+        microphone.disconnect();
+        microphone.mediaStream.getTracks().forEach(track => track.stop());
+        microphone = null;
+      }
+
+      if (analyser) {
+        analyser.disconnect();
+        analyser = null;
+      }
+    }
+
+    async function processResponse(data) {
+      statusDot.classList.add('thinking');
+      statusText.textContent = 'Thinking...';
+
+      const startTime = Date.now();
+
+      // Simulate processing times
+      const sttTime = 39 + Math.random() * 20;
+      const agentTime = 80 + Math.random() * 80;
+      const ttsTime = 39 + Math.random() * 20;
+
+      // Update stats with animation
+      animateCounter('sttTime', sttTime, 300);
+      animateCounter('agentTime', agentTime, 300);
+      animateCounter('ttsTime', ttsTime, 300);
+
+      await sleep(1500);
+
+      // Display response
+      responseArea.textContent = data.response;
+      responseArea.classList.remove('empty');
+      playbackButton.disabled = false;
+
+      statusDot.classList.remove('thinking');
+      statusText.textContent = 'Ready';
+
+      const totalTime = Math.round(sttTime + agentTime + ttsTime);
+      animateCounter('totalTime', totalTime, 300);
+    }
+
+    function animateCounter(elementId, targetValue, duration) {
+      const element = document.getElementById(elementId);
+      const startValue = parseInt(element.textContent);
+      const startTime = Date.now();
+
+      function update() {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        const value = Math.round(startValue + (targetValue - startValue) * progress);
+        element.textContent = value + 'ms';
+
+        if (progress < 1) {
+          requestAnimationFrame(update);
+        }
+      }
+
+      update();
+    }
+
+    // Language selector
+    document.querySelectorAll('.language-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.language-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentLanguage = btn.dataset.lang;
+        languageBadge.classList.remove('active');
+      });
+    });
+
+    // Playback button
+    playbackButton.addEventListener('click', () => {
+      // Simulate audio playback
+      playbackButton.disabled = true;
+      playbackButton.textContent = '🔊 Playing...';
+
+      setTimeout(() => {
+        playbackButton.disabled = false;
+        playbackButton.innerHTML = '<span>🔊</span> Play Response';
+      }, 2000);
+    });
+
+    // Mode toggle
+    modeToggle.addEventListener('click', () => {
+      // Just informational in demo
+      alert(`Mode: ${isLiveMode ? 'Live' : 'Demo'}\n\nTo use Live Mode, configure your API keys and ensure the server is running.`);
+    });
+
+    function showError(message) {
+      errorMessage.textContent = message;
+      errorMessage.classList.add('active');
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    // Initialize
+    drawWaveform();
+    checkLiveMode();
+  </script>
+</body>
+</html>

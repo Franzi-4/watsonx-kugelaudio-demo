@@ -1,0 +1,183 @@
+================================================================================
+  KugelAudio × IBM watsonx Orchestrate Integration Package
+  Node.js Code Templates - Complete Structure
+================================================================================
+
+DIRECTORY LAYOUT:
+├── package.json                           (35 lines)
+│   ├─ Dependencies: axios, express, ws, livekit-server-sdk, dotenv
+│   ├─ Scripts: start, dev, test
+│   └─ Engines: Node.js 18+
+│
+├── .env.example                           (17 lines)
+│   ├─ KugelAudio configuration
+│   ├─ IBM watsonx Orchestrate configuration
+│   └─ Optional Salesforce integration keys
+│
+├── README.md                              (350+ lines)
+│   ├─ Project overview and architecture
+│   ├─ Quick start guide
+│   ├─ Complete API reference
+│   ├─ Configuration guide
+│   ├─ Usage examples in JavaScript and Python
+│   └─ Production considerations
+│
+└── src/
+    ├── server.js                          (280+ lines)
+    │   ├─ Express HTTP server
+    │   ├─ WebSocket server setup
+    │   ├─ REST API endpoints (6 endpoints)
+    │   ├─ WebSocket handler for audio streaming
+    │   └─ Error handling and graceful shutdown
+    │
+    ├── kugelaudio-client.js               (320+ lines)
+    │   ├─ KugelAudio API client class
+    │   ├─ Methods:
+    │   │   ├─ textToSpeech(text, language, voiceId)
+    │   │   ├─ speechToText(audioBuffer, language)
+    │   │   ├─ cloneVoice(referenceAudioPath, voiceName)
+    │   │   ├─ listVoices()
+    │   │   ├─ detectLanguage(audioBuffer)
+    │   │   ├─ healthCheck()
+    │   │   └─ _requestWithRetry() [internal with exponential backoff]
+    │   ├─ Features:
+    │   │   ├─ Automatic retry logic (3 retries by default)
+    │   │   ├─ Exponential backoff for rate limiting
+    │   │   ├─ Support for 24 EU languages
+    │   │   ├─ 39ms average latency
+    │   │   └─ Comprehensive error handling
+    │   └─ Full JSDoc documentation
+    │
+    ├── watsonx-orchestrate-client.js      (280+ lines)
+    │   ├─ IBM watsonx Orchestrate API client
+    │   ├── IBM Cloud authentication
+    │   │   ├─ authenticate() - token management
+    │   │   └─ _ensureToken() - auto-refresh
+    │   ├─ Methods:
+    │   │   ├─ sendMessage(agentId, message, context)
+    │   │   ├─ createAgent(config)
+    │   │   ├─ listAgents()
+    │   │   ├─ getAgentResponse(agentId, conversationId, userMessage)
+    │   │   ├─ getAgent(agentId)
+    │   │   └─ healthCheck()
+    │   ├─ Features:
+    │   │   ├─ Automatic token refresh
+    │   │   ├─ Conversation context management
+    │   │   ├─ Project-scoped operations
+    │   │   └─ Full error handling
+    │   └─ Full JSDoc documentation
+    │
+    ├── voice-pipeline.js                  (380+ lines)
+    │   ├─ VoicePipeline orchestration class
+    │   ├─ Architecture:
+    │   │   ├─ Audio reception (WebSocket)
+    │   │   ├─ Language detection (39ms)
+    │   │   ├─ Speech-to-text (STT)
+    │   │   ├─ Intent classification
+    │   │   ├─ Agent routing
+    │   │   ├─ Response generation
+    │   │   ├─ Text-to-speech (TTS)
+    │   │   └─ Audio streaming
+    │   ├─ Methods:
+    │   │   ├─ processAudio(audioBuffer, sessionId)
+    │   │   ├─ setupAudioStream(ws, sessionId)
+    │   │   ├─ createSession(sessionId, options)
+    │   │   ├─ getSession(sessionId, options)
+    │   │   ├─ endSession(sessionId)
+    │   │   ├─ getSessionStats(sessionId)
+    │   │   └─ getActiveSessions()
+    │   ├─ Features:
+    │   │   ├─ Session management for concurrent calls
+    │   │   ├─ Audio chunk buffering
+    │   │   ├─ Real-time streaming
+    │   │   ├─ Escalation detection
+    │   │   ├─ Comprehensive logging
+    │   │   └─ Processing time tracking
+    │   └─ Full JSDoc documentation
+    │
+    └── agents/
+        └── customer-service-agent.js      (300+ lines)
+            ├─ Customer Service Agent configuration
+            ├─ Agent Config:
+            │   ├─ Name: "Customer Service Agent"
+            │   ├─ Capabilities: 8+ services
+            │   ├─ Language support: 12+ EU languages
+            │   ├─ Escalation rules with triggers
+            │   └─ Salesforce CRM integration
+            │
+            ├─ Intent Classification (8 intents):
+            │   ├─ general_inquiry
+            │   ├─ account_access
+            │   ├─ order_status
+            │   ├─ billing
+            │   ├─ complaint (escalates)
+            │   ├─ billing_dispute (escalates)
+            │   ├─ technical_issue (escalates)
+            │   └─ feedback
+            │
+            ├─ FAQ Database (5 pre-built FAQs):
+            │   ├─ Password reset
+            │   ├─ Return policy
+            │   ├─ Shipping information
+            │   ├─ Order tracking
+            │   └─ International shipping
+            │
+            ├─ Exported Functions:
+            │   ├─ classifyIntent(message) -> intent, confidence, escalate
+            │   ├─ searchFAQ(query, language) -> FAQ matches
+            │   ├─ buildAgentContext(customerData) -> context object
+            │   ├─ generateResponse(intent, context, message) -> response text
+            │   └─ intentClassificationRules, faqDatabase
+            │
+            ├─ Language Support:
+            │   ├─ English (EN)
+            │   ├─ German (DE)
+            │   ├─ French (FR)
+            │   ├─ Spanish (ES)
+            │   ├─ Italian (IT)
+            │   └─ 19+ more EU languages
+            │
+            └─ Multi-language responses included
+
+================================================================================
+TOTAL CODE METRICS:
+================================================================================
+  JavaScript Source:      1,576 lines of production-ready code
+  Documentation:          350+ lines (README.md)
+  Configuration Files:    3 files
+  Number of Classes:      3 (KugelAudioClient, WatsonxClient, VoicePipeline)
+  Number of Functions:    40+ well-documented functions
+  API Endpoints:          6 REST endpoints + 1 WebSocket
+  Language Support:       24 EU languages
+  Average Latency:        39ms (KugelAudio STT)
+
+================================================================================
+KEY FEATURES:
+================================================================================
+  ✓ Real-time voice AI integration
+  ✓ Multi-language support (24 EU languages)
+  ✓ Low latency (39ms average)
+  ✓ Automatic language detection
+  ✓ Voice cloning capabilities
+  ✓ Intent classification and routing
+  ✓ FAQ knowledge base included
+  ✓ CRM integration ready (Salesforce)
+  ✓ Escalation management
+  ✓ Conversation context tracking
+  ✓ Session management
+  ✓ Retry logic with exponential backoff
+  ✓ Error handling and logging
+  ✓ WebSocket streaming
+  ✓ Production-ready code
+
+================================================================================
+READY FOR DEPLOYMENT:
+================================================================================
+  1. Copy all files to your project
+  2. Run: npm install
+  3. Copy .env.example to .env
+  4. Add your API credentials
+  5. Run: npm start
+  6. Server ready on port 3000
+
+================================================================================
