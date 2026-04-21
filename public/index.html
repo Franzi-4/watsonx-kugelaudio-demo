@@ -635,34 +635,99 @@
     thread.appendChild(empty);
   });
 
-  // Web Speech API
+  // Web Speech API — dictation
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
     micBtn.disabled = true;
-    micBtn.title = 'Web Speech API unavailable';
+    micBtn.title = 'Web Speech API not supported in this browser (use Chrome or Edge)';
   } else {
-    const recog = new SR();
-    recog.continuous = false;
-    recog.interimResults = false;
+    let recog = null;
     let listening = false;
-    micBtn.addEventListener('click', () => {
-      if (listening) { recog.stop(); return; }
+    let micPermissionGranted = false;
+
+    // Explicit mic permission so Safari / locked-down Chrome prompts the user.
+    async function ensureMicPermission() {
+      if (micPermissionGranted) return true;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(t => t.stop());
+        micPermissionGranted = true;
+        return true;
+      } catch (e) {
+        const name = e?.name || 'permission';
+        showError(
+          name === 'NotAllowedError' || name === 'SecurityError'
+            ? 'Microphone access denied — enable it in browser settings and click 🎙 again.'
+            : `Microphone unavailable: ${name}`
+        );
+        return false;
+      }
+    }
+
+    // Human-readable labels for SpeechRecognition error codes.
+    const errLabels = {
+      'not-allowed': 'Microphone permission denied.',
+      'service-not-allowed': 'Browser refused to use the speech service.',
+      'network': 'Speech recognition server unreachable (Web Speech API requires internet).',
+      'no-speech': 'No speech detected — try again.',
+      'audio-capture': 'No microphone detected.',
+      'aborted': '',  // silent: happened because we stopped it
+      'bad-grammar': 'Grammar error.',
+      'language-not-supported': 'Language not supported by this browser.',
+    };
+
+    micBtn.addEventListener('click', async () => {
+      if (listening) {
+        try { recog?.stop(); } catch {}
+        return;
+      }
+      const ok = await ensureMicPermission();
+      if (!ok) return;
+
+      // Fresh recognizer each time — Chrome sometimes refuses to restart the same instance.
+      recog = new SR();
+      recog.continuous = false;
+      recog.interimResults = true;
+      recog.maxAlternatives = 1;
       const v = voices.find(v => v.id === selectedVoiceId);
       recog.lang = ({ DE: 'de-DE', EN: 'en-US', NL: 'nl-NL', PL: 'pl-PL', SL: 'sl-SI' })[v?.lang] || 'en-US';
-      try { recog.start(); } catch {}
+
+      recog.onstart = () => {
+        listening = true;
+        micBtn.classList.add('recording');
+        micHint.textContent = `listening (${recog.lang})…`;
+      };
+      recog.onresult = (ev) => {
+        // Stream interim transcript into the textarea so the user sees words appear live.
+        let finalText = '';
+        let interimText = '';
+        for (let i = 0; i < ev.results.length; i++) {
+          const chunk = ev.results[i][0].transcript;
+          if (ev.results[i].isFinal) finalText += chunk;
+          else interimText += chunk;
+        }
+        input.value = (finalText + interimText).trim();
+        autoResize();
+      };
+      recog.onerror = (ev) => {
+        const label = errLabels[ev.error] ?? `Dictation error: ${ev.error}`;
+        if (label) showError(label);
+        micHint.textContent = '';
+      };
+      recog.onend = () => {
+        listening = false;
+        micBtn.classList.remove('recording');
+        micHint.textContent = '';
+      };
+
+      try {
+        recog.start();
+      } catch (e) {
+        showError(`Couldn't start dictation: ${e.message}`);
+        listening = false;
+        micBtn.classList.remove('recording');
+      }
     });
-    recog.onstart = () => { listening = true; micBtn.classList.add('recording'); micHint.textContent = 'listening…'; };
-    recog.onresult = (ev) => {
-      const t = Array.from(ev.results).map(r => r[0].transcript).join(' ');
-      input.value = t;
-      autoResize();
-    };
-    recog.onerror = (ev) => { micHint.textContent = `mic: ${ev.error}`; };
-    recog.onend = () => {
-      listening = false;
-      micBtn.classList.remove('recording');
-      setTimeout(() => { micHint.textContent = ''; }, 2000);
-    };
   }
 
   renderVoices();
