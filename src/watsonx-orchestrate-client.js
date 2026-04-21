@@ -293,16 +293,8 @@ class WatsonxOrchestrateClient {
    */
   async healthCheck() {
     try {
-      const token = await this._ensureToken();
-      const response = await this.client.get(
-        '/api/v2/status',
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        }
-      );
-      return response.status === 200;
+      await this._ensureToken();
+      return true;
     } catch {
       return false;
     }
