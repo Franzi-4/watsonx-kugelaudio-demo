@@ -6,6 +6,27 @@ import KugelAudioClient from './kugelaudio-client.js';
 import WatsonxOrchestrateClient from './watsonx-orchestrate-client.js';
 import VoicePipeline from './voice-pipeline.js';
 
+// Wrap raw PCM16 LE bytes in a minimal WAV container so browsers can <audio src>.
+function pcmToWav(pcm, sampleRate, channels = 1, bitsPerSample = 16) {
+  const byteRate = sampleRate * channels * (bitsPerSample / 8);
+  const blockAlign = channels * (bitsPerSample / 8);
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
 // Load environment variables
 dotenv.config();
 
@@ -129,6 +150,47 @@ app.get('/api/voices', async (req, res) => {
       error: 'Failed to list voices',
       message: error.message,
     });
+  }
+});
+
+/**
+ * One-shot text turn: watsonx agent reply + KugelAudio TTS.
+ * POST /api/converse  { text, sessionId?, voiceId?, language? }
+ * Returns { responseText, intent, escalated, processingTime, sampleRate, audio (base64 wav) }.
+ */
+app.post('/api/converse', async (req, res) => {
+  try {
+    const { text, sessionId: providedSessionId, voiceId, language } = req.body || {};
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ error: 'text is required' });
+    }
+
+    const sessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    if (!voicePipeline.activeSessions.has(sessionId)) {
+      voicePipeline.createSession(sessionId, { language: language || 'en' });
+    }
+    if (voiceId !== undefined) {
+      voicePipeline.voiceConfig.voiceId = Number(voiceId);
+    }
+
+    const result = await voicePipeline.processText(text, sessionId, { language });
+    const wav = pcmToWav(result.audio, result.sampleRate);
+
+    res.json({
+      sessionId,
+      userText: result.userText,
+      responseText: result.responseText,
+      language: result.language,
+      intent: result.intent,
+      escalated: result.escalated,
+      processingTime: result.processingTime,
+      sampleRate: result.sampleRate,
+      audio: wav.toString('base64'),
+      audioMime: 'audio/wav',
+    });
+  } catch (error) {
+    console.error('converse error:', error);
+    res.status(500).json({ error: 'converse failed', message: error.message });
   }
 });
 
