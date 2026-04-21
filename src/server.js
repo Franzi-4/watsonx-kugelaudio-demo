@@ -110,11 +110,19 @@ app.get('/api/agents', async (req, res) => {
  */
 app.get('/api/voices', async (req, res) => {
   try {
-    const voices = await kugelAudioClient.listVoices();
+    const { language, limit, offset, includePublic } = req.query;
+    const result = await kugelAudioClient.listVoices({
+      language,
+      limit: limit !== undefined ? Number(limit) : undefined,
+      offset: offset !== undefined ? Number(offset) : undefined,
+      includePublic: includePublic !== undefined ? includePublic === 'true' : undefined,
+    });
     res.json({
-      voices,
-      count: voices.length,
-      supported_languages: 24,
+      voices: result.voices,
+      count: result.voices.length,
+      total: result.total,
+      limit: result.limit,
+      offset: result.offset,
     });
   } catch (error) {
     res.status(500).json({

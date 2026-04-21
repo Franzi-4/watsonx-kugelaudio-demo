@@ -81,185 +81,100 @@ class VoicePipeline {
   }
 
   /**
-   * Process audio through the complete voice pipeline
-   *
-   * @param {Buffer} audioBuffer - Audio buffer to process
-   * @param {string} sessionId - Session identifier
-   * @returns {Promise<{
-   *   text: string,
-   *   language: string,
-   *   audioBuffer: Buffer,
-   *   confidence: number,
-   *   processingTime: number
-   * }>} Pipeline output
+   * Process a user text turn: agent response + KugelAudio TTS.
+   * Returns { userText, responseText, audio, sampleRate, audioFormat, intent, escalated, processingTime }.
    */
-  async processAudio(audioBuffer, sessionId) {
+  async processText(userText, sessionId, { language } = {}) {
     const startTime = Date.now();
+    const session = this.getSession(sessionId);
 
+    if (language) session.context.conversation.language = language;
+    const activeLanguage = session.context.conversation.language || this.voiceConfig.language;
+
+    const intentResult = classifyIntent(userText);
+    session.context.conversation.intent = intentResult.intent;
+
+    let responseText;
     try {
-      const session = this.getSession(sessionId);
-
-      // Step 1: Detect language (39ms latency)
-      console.log(`[${sessionId}] Detecting language...`);
-      const languageDetection = await this.kugelAudioClient.detectLanguage(audioBuffer);
-      const detectedLanguage = languageDetection.language;
-      session.context.conversation.language = detectedLanguage;
-
-      // Step 2: Speech-to-text transcription
-      console.log(`[${sessionId}] Transcribing speech to text...`);
-      const transcription = await this.kugelAudioClient.speechToText(audioBuffer, detectedLanguage);
-      const userText = transcription.text;
-      const transcriptionConfidence = transcription.confidence || 0.95;
-
-      console.log(`[${sessionId}] Transcribed: "${userText}"`);
-
-      // Step 3: Classify intent
-      console.log(`[${sessionId}] Classifying intent...`);
-      const intentResult = classifyIntent(userText);
-      session.context.conversation.intent = intentResult.intent;
-
-      // Step 4: Route to watsonx Orchestrate agent
-      console.log(`[${sessionId}] Sending to watsonx agent...`);
       const agentResponse = await this.watsonxClient.getAgentResponse(
         this.defaultAgentId,
         session.conversationId,
-        userText
-      );
-
-      const responseText = agentResponse.text || await generateResponse(
-        intentResult.intent,
-        session.context,
-        userText
-      );
-
-      // Step 5: Check for escalation
-      if (intentResult.shouldEscalate) {
-        console.log(`[${sessionId}] Escalation triggered for intent: ${intentResult.intent}`);
-        session.context.escalation.triggered = true;
-        session.context.escalation.reason = intentResult.intent;
-      }
-
-      // Step 6: Text-to-speech synthesis with voice cloning
-      console.log(`[${sessionId}] Synthesizing response to speech...`);
-      const responseAudio = await this.kugelAudioClient.textToSpeech(
-        responseText,
-        detectedLanguage,
-        this.voiceConfig.voiceId
-      );
-
-      // Update session
-      session.messageCount++;
-      session.context.conversation.messages.push({
-        role: 'user',
-        text: userText,
-        timestamp: new Date().toISOString(),
-      });
-      session.context.conversation.messages.push({
-        role: 'assistant',
-        text: responseText,
-        timestamp: new Date().toISOString(),
-      });
-
-      const processingTime = Date.now() - startTime;
-
-      console.log(`[${sessionId}] Pipeline complete (${processingTime}ms)`);
-
-      return {
         userText,
-        responseText,
-        language: detectedLanguage,
-        audioBuffer: responseAudio,
-        confidence: transcriptionConfidence,
-        processingTime,
-        intent: intentResult.intent,
-        escalated: intentResult.shouldEscalate,
-      };
+      );
+      responseText = agentResponse?.text;
     } catch (error) {
-      console.error(`[${sessionId}] Pipeline error:`, error);
-      throw error;
+      console.warn(`[${sessionId}] watsonx call failed, falling back to local agent: ${error.message}`);
     }
+    if (!responseText) {
+      responseText = await generateResponse(intentResult.intent, session.context, userText);
+    }
+
+    if (intentResult.shouldEscalate) {
+      session.context.escalation.triggered = true;
+      session.context.escalation.reason = intentResult.intent;
+    }
+
+    const tts = await this.kugelAudioClient.textToSpeech(responseText, {
+      voiceId: this.voiceConfig.voiceId,
+      language: activeLanguage,
+    });
+
+    session.messageCount++;
+    session.context.conversation.messages.push(
+      { role: 'user', text: userText, timestamp: new Date().toISOString() },
+      { role: 'assistant', text: responseText, timestamp: new Date().toISOString() },
+    );
+
+    return {
+      userText,
+      responseText,
+      language: activeLanguage,
+      audio: tts.audio,
+      sampleRate: tts.sampleRate,
+      audioFormat: tts.audioFormat,
+      processingTime: Date.now() - startTime,
+      intent: intentResult.intent,
+      escalated: intentResult.shouldEscalate,
+    };
   }
 
   /**
-   * Stream audio processing with WebSocket
-   * Handles chunked audio data from client
-   *
-   * @param {WebSocket} ws - WebSocket connection
-   * @param {string} sessionId - Session identifier
+   * WebSocket handler — expects JSON control messages.
+   *  { type: 'user_text', text, language? } → runs pipeline, responds with JSON + binary audio
+   *  { type: 'end_session' } → closes session
    */
-  async setupAudioStream(ws, sessionId) {
-    const session = this.getSession(sessionId);
-    let audioChunks = [];
-    const CHUNK_THRESHOLD = 32000; // Process when 2 seconds of audio accumulated (16kHz sample rate)
-
+  setupAudioStream(ws, sessionId) {
     ws.on('message', async (data) => {
+      let message;
       try {
-        // Handle binary audio data
-        if (Buffer.isBuffer(data)) {
-          audioChunks.push(data);
+        message = JSON.parse(data.toString());
+      } catch {
+        ws.send(JSON.stringify({ type: 'error', sessionId, message: 'Expected JSON message' }));
+        return;
+      }
 
-          // Process when threshold reached or on explicit flush signal
-          if (Buffer.concat(audioChunks).length >= CHUNK_THRESHOLD) {
-            const audioBuffer = Buffer.concat(audioChunks);
-            audioChunks = [];
-
-            const result = await this.processAudio(audioBuffer, sessionId);
-
-            // Send response back to client
-            ws.send(JSON.stringify({
-              type: 'response',
-              sessionId,
-              text: result.responseText,
-              language: result.language,
-              intent: result.intent,
-              escalated: result.escalated,
-              processingTime: result.processingTime,
-            }));
-
-            // Send audio data
-            ws.send(result.audioBuffer, { binary: true }, (error) => {
-              if (error) {
-                console.error(`[${sessionId}] Error sending audio:`, error);
-              }
-            });
-          }
-        }
-        // Handle control messages
-        else if (typeof data === 'string') {
-          const message = JSON.parse(data);
-
-          if (message.type === 'flush') {
-            // Process any remaining audio
-            if (audioChunks.length > 0) {
-              const audioBuffer = Buffer.concat(audioChunks);
-              audioChunks = [];
-
-              const result = await this.processAudio(audioBuffer, sessionId);
-
-              ws.send(JSON.stringify({
-                type: 'response',
-                sessionId,
-                text: result.responseText,
-                language: result.language,
-                intent: result.intent,
-                escalated: result.escalated,
-                processingTime: result.processingTime,
-              }));
-
-              ws.send(result.audioBuffer, { binary: true });
-            }
-          } else if (message.type === 'end_session') {
-            this.endSession(sessionId);
-            ws.close(1000, 'Session ended');
-          }
+      try {
+        if (message.type === 'user_text') {
+          const result = await this.processText(message.text, sessionId, { language: message.language });
+          ws.send(JSON.stringify({
+            type: 'response',
+            sessionId,
+            text: result.responseText,
+            language: result.language,
+            intent: result.intent,
+            escalated: result.escalated,
+            processingTime: result.processingTime,
+            sampleRate: result.sampleRate,
+            audioFormat: result.audioFormat,
+          }));
+          ws.send(result.audio, { binary: true });
+        } else if (message.type === 'end_session') {
+          this.endSession(sessionId);
+          ws.close(1000, 'Session ended');
         }
       } catch (error) {
-        console.error(`[${sessionId}] Audio stream error:`, error);
-        ws.send(JSON.stringify({
-          type: 'error',
-          sessionId,
-          message: error.message,
-        }));
+        console.error(`[${sessionId}] pipeline error:`, error);
+        ws.send(JSON.stringify({ type: 'error', sessionId, message: error.message }));
       }
     });
 
@@ -273,12 +188,7 @@ class VoicePipeline {
       this.endSession(sessionId);
     });
 
-    // Send ready signal
-    ws.send(JSON.stringify({
-      type: 'ready',
-      sessionId,
-      message: 'Ready to receive audio',
-    }));
+    ws.send(JSON.stringify({ type: 'ready', sessionId, message: 'Ready to receive user_text messages' }));
   }
 
   /**
