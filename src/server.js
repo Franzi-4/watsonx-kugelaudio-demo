@@ -90,8 +90,15 @@ app.get('/api/health', async (req, res) => {
       timestamp: new Date().toISOString(),
       services: {
         kugelaudio: kugelAudioHealth ? 'up' : 'down',
-        watsonx: watsonxHealth ? 'up' : 'down',
+        watsonx_ai: watsonxHealth ? 'up' : 'down',
+        watsonx_orchestrate: process.env.ORCHESTRATE_URL ? 'provisioned' : 'missing',
+        watsonx_governance: process.env.GOVERNANCE_GUID ? 'provisioned' : 'missing',
       },
+      orchestrate: process.env.ORCHESTRATE_URL ? {
+        launch_url: process.env.ORCHESTRATE_URL + '/chat',
+        agent: process.env.ORCHESTRATE_AGENT || 'AskOrchestrate',
+      } : null,
+      model: 'meta-llama/llama-3-3-70b-instruct',
     });
   } catch (error) {
     res.status(500).json({
