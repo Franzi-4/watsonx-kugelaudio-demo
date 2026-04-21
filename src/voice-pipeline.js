@@ -1,5 +1,5 @@
 import KugelAudioClient from './kugelaudio-client.js';
-import WatsonxOrchestrateClient from './watsonx-orchestrate-client.js';
+import WatsonxClient from './watsonx-client.js';
 import { classifyIntent, generateResponse, buildAgentContext } from './agents/customer-service-agent.js';
 
 /**
@@ -21,7 +21,7 @@ class VoicePipeline {
    * Initialize voice pipeline
    * @param {Object} config - Configuration object
    * @param {KugelAudioClient} config.kugelAudioClient - KugelAudio API client
-   * @param {WatsonxOrchestrateClient} config.watsonxClient - watsonx Orchestrate client
+   * @param {WatsonxClient} config.watsonxClient - watsonx.ai chat client
    * @param {string} config.defaultAgentId - Default agent to route queries to
    * @param {Object} config.voiceConfig - Voice configuration (voiceId, language, etc.)
    */
@@ -150,12 +150,11 @@ class VoicePipeline {
 
   _buildSystemPrompt() {
     return [
-      'You are a friendly, concise customer service voice agent for an automotive dealership.',
+      'You are a helpful, concise voice assistant.',
       'Always reply in the same language the user writes in.',
-      'Keep every response to 1–2 short sentences suitable for being spoken aloud.',
+      'Keep every response to 1–3 short sentences suitable for being spoken aloud.',
       'Never use markdown, bullet points, lists, or emoji — only plain sentences.',
-      'If information is missing, ask a single clarifying question.',
-      'If the user sounds upset or mentions a complaint, acknowledge the frustration briefly before helping.',
+      'If a question is ambiguous, ask a single clarifying question instead of guessing.',
     ].join(' ');
   }
 

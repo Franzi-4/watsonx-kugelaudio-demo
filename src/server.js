@@ -3,7 +3,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import KugelAudioClient from './kugelaudio-client.js';
-import WatsonxOrchestrateClient from './watsonx-orchestrate-client.js';
+import WatsonxClient from './watsonx-client.js';
 import VoicePipeline from './voice-pipeline.js';
 
 // Wrap raw PCM16 LE bytes in a minimal WAV container so browsers can <audio src>.
@@ -47,7 +47,7 @@ const kugelAudioClient = new KugelAudioClient({
   apiUrl: process.env.KUGELAUDIO_API_URL,
 });
 
-const watsonxClient = new WatsonxOrchestrateClient({
+const watsonxClient = new WatsonxClient({
   apiKey: process.env.WATSONX_API_KEY,
   url: process.env.WATSONX_URL,
   projectId: process.env.WATSONX_PROJECT_ID,
