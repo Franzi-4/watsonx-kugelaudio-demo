@@ -94,16 +94,25 @@ class VoicePipeline {
     const intentResult = classifyIntent(userText);
     session.context.conversation.intent = intentResult.intent;
 
+    const systemPrompt = this._buildSystemPrompt();
+    const history = (session.context.conversation.messages || []).slice(-8).map(m => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.text,
+    }));
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...history,
+      { role: 'user', content: userText },
+    ];
+
     let responseText;
+    let usage;
     try {
-      const agentResponse = await this.watsonxClient.getAgentResponse(
-        this.defaultAgentId,
-        session.conversationId,
-        userText,
-      );
-      responseText = agentResponse?.text;
+      const reply = await this.watsonxClient.chat(messages, { maxTokens: 250, temperature: 0.7 });
+      responseText = reply.text?.trim();
+      usage = reply.usage;
     } catch (error) {
-      console.warn(`[${sessionId}] watsonx call failed, falling back to local agent: ${error.message}`);
+      console.warn(`[${sessionId}] watsonx chat failed: ${error.message} — falling back to local agent`);
     }
     if (!responseText) {
       responseText = await generateResponse(intentResult.intent, session.context, userText);
@@ -135,7 +144,19 @@ class VoicePipeline {
       processingTime: Date.now() - startTime,
       intent: intentResult.intent,
       escalated: intentResult.shouldEscalate,
+      usage,
     };
+  }
+
+  _buildSystemPrompt() {
+    return [
+      'You are a friendly, concise customer service voice agent for an automotive dealership.',
+      'Always reply in the same language the user writes in.',
+      'Keep every response to 1–2 short sentences suitable for being spoken aloud.',
+      'Never use markdown, bullet points, lists, or emoji — only plain sentences.',
+      'If information is missing, ask a single clarifying question.',
+      'If the user sounds upset or mentions a complaint, acknowledge the frustration briefly before helping.',
+    ].join(' ');
   }
 
   /**
