@@ -8,17 +8,17 @@
 <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
 <style>
   :root {
-    --bg: #000000;
-    --bg-1: #0a0a0a;
-    --bg-2: #0f0f0f;
-    --border: rgba(255,255,255,0.08);
-    --border-2: rgba(255,255,255,0.14);
-    --fg: #ededed;
-    --fg-2: #a1a1a1;
-    --fg-3: #6e6e6e;
-    --fg-4: #444444;
-    --success: #0cce6b;
-    --danger: #ef4444;
+    --bg: #ffffff;
+    --bg-1: #fafafa;
+    --bg-2: #f4f4f5;
+    --border: rgba(0,0,0,0.08);
+    --border-2: rgba(0,0,0,0.18);
+    --fg: #0a0a0a;
+    --fg-2: #525252;
+    --fg-3: #737373;
+    --fg-4: #a3a3a3;
+    --success: #10a86e;
+    --danger: #dc2626;
     --radius: 8px;
     --radius-sm: 5px;
     --mono: 'Geist Mono', ui-monospace, 'JetBrains Mono', 'SFMono-Regular', Menlo, monospace;
@@ -260,10 +260,8 @@
     margin-top: 6px;
     width: 100%;
     height: 28px;
-    filter: invert(0.92) hue-rotate(180deg);
     outline: none;
   }
-  audio::-webkit-media-controls-panel { background: var(--bg-1); }
   .msg-meta {
     font-family: var(--mono);
     font-size: 10px;
@@ -377,9 +375,9 @@
     max-width: 680px;
     margin: 0 auto 10px;
     padding: 9px 12px;
-    border: 1px solid rgba(239,68,68,0.4);
-    color: #fca5a5;
-    background: rgba(239,68,68,0.04);
+    border: 1px solid rgba(220,38,38,0.3);
+    color: #991b1b;
+    background: rgba(220,38,38,0.04);
     border-radius: var(--radius-sm);
     font-size: 12px;
     font-family: var(--mono);
@@ -389,8 +387,8 @@
   /* scrollbar */
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 5px; }
-  ::-webkit-scrollbar-thumb:hover { background: var(--fg-4); }
+  ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.12); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.22); }
 </style>
 </head>
 <body>
