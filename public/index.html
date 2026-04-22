@@ -810,10 +810,46 @@
 
   let liveActive = false;
   let liveRecog = null;
-  let liveAudio = null;
+  let liveAudio = null;          // legacy HTMLAudioElement (unused once audioCtx is alive)
   let liveSilenceTimer = null;
   let liveBuffer = '';
-  const LIVE_SILENCE_MS = 800;  // auto-submit after this long of silence
+  let audioCtx = null;           // created on user gesture in liveStart()
+  let currentSource = null;      // active AudioBufferSourceNode, for stop()
+  const LIVE_SILENCE_MS = 800;
+
+  // Decode base64 WAV → AudioBuffer and play through the shared AudioContext.
+  // Resolves when playback ends. Using AudioContext (not <audio>) because
+  // sequential HTMLAudioElement.play() calls hit browser autoplay limits
+  // once the original user-gesture activation token is consumed.
+  function playBase64Wav(b64) {
+    return new Promise((resolve) => {
+      if (!audioCtx) return resolve();
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      audioCtx.decodeAudioData(
+        bytes.buffer.slice(0),
+        (buffer) => {
+          try {
+            const src = audioCtx.createBufferSource();
+            src.buffer = buffer;
+            src.connect(audioCtx.destination);
+            currentSource = src;
+            src.onended = () => {
+              if (currentSource === src) currentSource = null;
+              resolve();
+            };
+            src.start(0);
+          } catch (e) {
+            console.warn('audio start failed', e);
+            resolve();
+          }
+        },
+        (err) => {
+          console.warn('decodeAudioData failed', err);
+          resolve();
+        },
+      );
+    });
+  }
 
   function setOrbState(s) {
     liveOrb.classList.remove('listening', 'thinking', 'speaking');
@@ -838,6 +874,17 @@
       showError('Microphone access denied — enable it and try again.');
       return;
     }
+    // Unlock AudioContext on the same user gesture so later programmatic
+    // playback isn't blocked by the browser's autoplay policy.
+    try {
+      if (!audioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new Ctx();
+      }
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+    } catch (e) {
+      console.warn('AudioContext init failed', e);
+    }
     liveActive = true;
     liveOverlay.classList.add('active');
     liveBuffer = '';
@@ -850,6 +897,7 @@
     liveActive = false;
     clearLiveSilenceTimer();
     if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; }
+    if (currentSource) { try { currentSource.stop(); } catch {} currentSource = null; }
     if (liveAudio) { liveAudio.pause(); liveAudio.src = ''; liveAudio = null; }
     liveOverlay.classList.remove('active');
     setOrbState('idle');
@@ -935,30 +983,25 @@
     let finalMeta = null;
     const t0 = Date.now();
 
+    let playing = false;  // ensure only one playback loop runs at a time
     const playNextIfReady = async () => {
-      if (!liveActive) return;
-      while (audioByIdx.has(nextToPlay)) {
-        const chunk = audioByIdx.get(nextToPlay);
-        audioByIdx.delete(nextToPlay);
-        nextToPlay++;
-        if (!speakingStarted) {
-          speakingStarted = true;
-          setOrbState('speaking');
+      if (playing || !liveActive) return;
+      playing = true;
+      try {
+        while (audioByIdx.has(nextToPlay)) {
+          const chunk = audioByIdx.get(nextToPlay);
+          audioByIdx.delete(nextToPlay);
+          nextToPlay++;
+          if (!speakingStarted) {
+            speakingStarted = true;
+            setOrbState('speaking');
+          }
+          await playBase64Wav(chunk.audio);
+          if (!liveActive) return;
         }
-        try {
-          liveAudio = new Audio(`data:audio/wav;base64,${chunk.audio}`);
-          await new Promise((resolve) => {
-            liveAudio.onended = resolve;
-            liveAudio.onerror = resolve;
-            liveAudio.play().catch(resolve);
-          });
-          liveAudio = null;
-        } catch (e) {
-          liveAudio = null;
-        }
-        if (!liveActive) return;
+      } finally {
+        playing = false;
       }
-      // Queue empty — if stream finished, go back to listening.
       if (streamDone) {
         pending.remove();
         addMessage({
