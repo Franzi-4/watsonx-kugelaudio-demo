@@ -1,6 +1,7 @@
 import KugelAudioClient from './kugelaudio-client.js';
 import WatsonxClient from './watsonx-client.js';
 import { classifyIntent, generateResponse, buildAgentContext } from './agents/customer-service-agent.js';
+import { getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
 
 /**
  * Voice Pipeline Manager
@@ -48,14 +49,18 @@ class VoicePipeline {
    * @returns {Object} Session context
    */
   createSession(sessionId, options = {}) {
+    const scenarioId = options.scenarioId || DEFAULT_SCENARIO_ID;
+    const scenario = getScenario(scenarioId);
+
     const context = buildAgentContext({
-      language: options.language || 'en',
+      language: options.language || scenario.defaultLanguage || 'en',
       ...options,
     });
 
     const session = {
       id: sessionId,
       context,
+      scenarioId: scenario.id,
       conversationId: `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       startTime: Date.now(),
       messageCount: 0,
@@ -84,17 +89,20 @@ class VoicePipeline {
    * Process a user text turn: agent response + KugelAudio TTS.
    * Returns { userText, responseText, audio, sampleRate, audioFormat, intent, escalated, processingTime }.
    */
-  async processText(userText, sessionId, { language } = {}) {
+  async processText(userText, sessionId, { language, scenarioId } = {}) {
     const startTime = Date.now();
     const session = this.getSession(sessionId);
 
+    if (scenarioId && scenarioId !== session.scenarioId) {
+      session.scenarioId = scenarioId;
+    }
     if (language) session.context.conversation.language = language;
     const activeLanguage = session.context.conversation.language || this.voiceConfig.language;
 
     const intentResult = classifyIntent(userText);
     session.context.conversation.intent = intentResult.intent;
 
-    const systemPrompt = this._buildSystemPrompt();
+    const systemPrompt = this._buildSystemPrompt(session.scenarioId);
     const history = (session.context.conversation.messages || []).slice(-8).map(m => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
       content: m.text,
@@ -148,7 +156,9 @@ class VoicePipeline {
     };
   }
 
-  _buildSystemPrompt() {
+  _buildSystemPrompt(scenarioId) {
+    const scenario = getScenario(scenarioId);
+    if (scenario?.systemPrompt) return scenario.systemPrompt;
     return [
       'You are a helpful, concise voice assistant.',
       'Always reply in the same language the user writes in.',

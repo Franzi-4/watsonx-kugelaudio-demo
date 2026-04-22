@@ -5,6 +5,7 @@ import { createServer } from 'http';
 import KugelAudioClient from './kugelaudio-client.js';
 import WatsonxClient from './watsonx-client.js';
 import VoicePipeline from './voice-pipeline.js';
+import { listScenarios, getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
 
 // Wrap raw PCM16 LE bytes in a minimal WAV container so browsers can <audio src>.
 function pcmToWav(pcm, sampleRate, channels = 1, bitsPerSample = 16) {
@@ -130,6 +131,21 @@ app.get('/api/agents', async (req, res) => {
 });
 
 /**
+ * List Demo Scenarios
+ * GET /api/scenarios
+ *
+ * Returns the demo use cases (Versicherungs-Claims, Bürgerhotline) that the
+ * UI can switch between. Each scenario carries its own system prompt and
+ * greeting; selection happens via `scenarioId` on POST /api/converse.
+ */
+app.get('/api/scenarios', (req, res) => {
+  res.json({
+    scenarios: listScenarios(),
+    defaultScenarioId: DEFAULT_SCENARIO_ID,
+  });
+});
+
+/**
  * List Available Voices
  * GET /api/voices
  *
@@ -161,26 +177,84 @@ app.get('/api/voices', async (req, res) => {
 });
 
 /**
+ * Kick off a scenario with the agent's opening line.
+ * POST /api/scenario/start { scenarioId, voiceId?, sessionId? }
+ *
+ * Returns the scenario's canned greeting plus Kugel TTS audio so the UI can
+ * open the call with the agent speaking first — no LLM round-trip needed.
+ */
+app.post('/api/scenario/start', async (req, res) => {
+  try {
+    const { scenarioId, voiceId, sessionId: providedSessionId } = req.body || {};
+    const scenario = getScenario(scenarioId);
+
+    // Fresh session every time a scenario is started, so the system prompt
+    // and conversation history belong to this one call.
+    const sessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    voicePipeline.activeSessions.delete(sessionId);
+    const session = voicePipeline.createSession(sessionId, {
+      language: scenario.defaultLanguage || 'de',
+      scenarioId: scenario.id,
+    });
+    if (voiceId !== undefined) {
+      voicePipeline.voiceConfig.voiceId = Number(voiceId);
+    }
+
+    const greeting = scenario.greeting;
+    const tts = await kugelAudioClient.textToSpeech(greeting, {
+      voiceId: voicePipeline.voiceConfig.voiceId,
+      language: scenario.defaultLanguage || 'de',
+    });
+    const wav = pcmToWav(tts.audio, tts.sampleRate);
+
+    // Seed the conversation history so the LLM sees its own opening turn.
+    session.context.conversation.messages.push({
+      role: 'assistant',
+      text: greeting,
+      timestamp: new Date().toISOString(),
+    });
+    session.messageCount++;
+
+    res.json({
+      sessionId,
+      scenarioId: scenario.id,
+      scenarioLabel: scenario.label,
+      greeting,
+      language: scenario.defaultLanguage || 'de',
+      sampleRate: tts.sampleRate,
+      audio: wav.toString('base64'),
+      audioMime: 'audio/wav',
+    });
+  } catch (error) {
+    console.error('scenario/start error:', error);
+    res.status(500).json({ error: 'scenario start failed', message: error.message });
+  }
+});
+
+/**
  * One-shot text turn: watsonx agent reply + KugelAudio TTS.
  * POST /api/converse  { text, sessionId?, voiceId?, language? }
  * Returns { responseText, intent, escalated, processingTime, sampleRate, audio (base64 wav) }.
  */
 app.post('/api/converse', async (req, res) => {
   try {
-    const { text, sessionId: providedSessionId, voiceId, language } = req.body || {};
+    const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
     if (!text || typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'text is required' });
     }
 
+    const scenario = getScenario(scenarioId);
+    const effectiveLanguage = language || scenario.defaultLanguage || 'en';
+
     const sessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     if (!voicePipeline.activeSessions.has(sessionId)) {
-      voicePipeline.createSession(sessionId, { language: language || 'en' });
+      voicePipeline.createSession(sessionId, { language: effectiveLanguage, scenarioId: scenario.id });
     }
     if (voiceId !== undefined) {
       voicePipeline.voiceConfig.voiceId = Number(voiceId);
     }
 
-    const result = await voicePipeline.processText(text, sessionId, { language });
+    const result = await voicePipeline.processText(text, sessionId, { language, scenarioId: scenario.id });
     const wav = pcmToWav(result.audio, result.sampleRate);
 
     res.json({
@@ -217,10 +291,13 @@ app.post('/api/converse', async (req, res) => {
  */
 app.post('/api/converse/stream', async (req, res) => {
   const t0 = Date.now();
-  const { text, sessionId: providedSessionId, voiceId, language } = req.body || {};
+  const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
   if (!text || typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ error: 'text is required' });
   }
+
+  const scenario = getScenario(scenarioId);
+  const effectiveLanguage = language || scenario.defaultLanguage || 'en';
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -235,16 +312,18 @@ app.post('/api/converse/stream', async (req, res) => {
   try {
     const sessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     if (!voicePipeline.activeSessions.has(sessionId)) {
-      voicePipeline.createSession(sessionId, { language: language || 'en' });
+      voicePipeline.createSession(sessionId, { language: effectiveLanguage, scenarioId: scenario.id });
     }
     if (voiceId !== undefined) {
       voicePipeline.voiceConfig.voiceId = Number(voiceId);
     }
     const session = voicePipeline.getSession(sessionId);
-    send('session', { sessionId });
+    // Allow the client to switch scenarios mid-session without creating a new session.
+    if (scenario.id !== session.scenarioId) session.scenarioId = scenario.id;
+    send('session', { sessionId, scenarioId: session.scenarioId });
 
     // Build conversation history for the model
-    const systemPrompt = voicePipeline._buildSystemPrompt();
+    const systemPrompt = voicePipeline._buildSystemPrompt(session.scenarioId);
     const history = (session.context.conversation.messages || []).slice(-8).map((m) => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
       content: m.text,

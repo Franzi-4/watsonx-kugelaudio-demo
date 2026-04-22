@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>watsonx · Voice Agent</title>
+<title>watsonx · Voice Agent · IBM Demo</title>
 <link rel="preconnect" href="https://rsms.me/" />
 <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
 <style>
@@ -136,6 +136,120 @@
   .stack-item.ok .d { background: var(--success); }
   .stack-item.ok { color: var(--fg); }
   .stack-sep { color: var(--fg-4); }
+
+  /* ─── scenario switcher (segmented, product-toggle style) ─ */
+  .scenario-bar {
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    display: flex;
+    justify-content: center;
+    flex-shrink: 0;
+    background: var(--bg-1);
+  }
+  .scenario-toggle {
+    display: inline-flex;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px;
+    gap: 2px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+  }
+  .scenario-tab {
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    padding: 7px 16px 7px 12px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--fg-2);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 140ms ease;
+    white-space: nowrap;
+  }
+  .scenario-tab:hover { color: var(--fg); }
+  .scenario-tab.active {
+    background: var(--fg);
+    color: var(--bg);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+  }
+  .scenario-tab-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: var(--bg-2);
+    color: var(--fg-2);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 140ms ease;
+  }
+  .scenario-tab-icon svg { width: 13px; height: 13px; }
+  .scenario-tab.active .scenario-tab-icon {
+    background: rgba(255,255,255,0.16);
+    color: var(--bg);
+  }
+  .scenario-tab-sub {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: var(--fg-4);
+    margin-left: 2px;
+  }
+  .scenario-tab.active .scenario-tab-sub {
+    color: rgba(255,255,255,0.55);
+  }
+
+  .scenario-hint {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 8px 16px 0;
+    font-size: 12px;
+    color: var(--fg-2);
+    text-align: center;
+    line-height: 1.5;
+  }
+  .scenario-hint b { color: var(--fg); font-weight: 500; }
+
+  .suggestions-bar {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    flex-shrink: 0;
+    align-items: center;
+  }
+  .suggestions-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--fg-3);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-right: 4px;
+    white-space: nowrap;
+  }
+  .suggestion-chip {
+    font: inherit;
+    font-size: 11px;
+    padding: 5px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-1);
+    color: var(--fg-2);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 100ms;
+    max-width: 420px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .suggestion-chip:hover { color: var(--fg); border-color: var(--border-2); }
 
   /* ─── voice chips ────────────────────────────────────── */
   .voice-bar {
@@ -566,6 +680,16 @@
   <span class="stack-item" id="s-kugel"><span class="d"></span>KugelAudio</span>
 </div>
 
+<div class="scenario-bar" id="scenarioBar">
+  <div class="scenario-toggle" role="tablist" id="scenarioToggle"></div>
+</div>
+<div class="scenario-hint" id="scenarioHint"></div>
+
+<div class="suggestions-bar" id="suggestionsBar">
+  <span class="suggestions-label">Beispiele</span>
+  <div id="suggestionsRow" style="display:flex;gap:6px;overflow-x:auto;flex:1"></div>
+</div>
+
 <div class="voice-bar">
   <span class="voice-label">voice</span>
   <div id="voiceRow" style="display:flex;gap:5px"></div>
@@ -574,13 +698,13 @@
 <main id="main">
   <div class="thread" id="thread">
     <div class="empty-state" id="emptyState">
-      <h2>Voice Agent</h2>
-      <div class="lede">A hands-free conversational AI running on IBM watsonx.ai with Llama 3.3 70B. Speak, and KugelAudio speaks back — no buttons between turns.</div>
-      <button id="heroLiveBtn" class="hero-cta">
+      <h2 id="emptyTitle">Voice Agent</h2>
+      <div class="lede" id="emptyLede">Wähle oben ein Szenario — der Agent meldet sich auf Deutsch, du antwortest per Stimme oder Text.</div>
+      <button id="heroStartBtn" class="hero-cta">
         <span class="pulse"></span>
-        Tap to start live conversation
+        Anruf starten
       </button>
-      <div class="hint">or type below · <kbd>⌘</kbd> <kbd>↵</kbd> to send · <kbd>Esc</kbd> to exit live</div>
+      <div class="hint">der Agent meldet sich zuerst · <kbd>⌘</kbd> <kbd>↵</kbd> antworten · <kbd>Esc</kbd> Live beenden</div>
     </div>
   </div>
 </main>
@@ -637,6 +761,8 @@
   let selectedVoiceId = 977;
   let sessionId = null;
   let sending = false;
+  let scenarios = [];
+  let selectedScenarioId = null;
 
   const voices = [
     { id: 977, name: 'Dominik', lang: 'DE' },
@@ -652,6 +778,153 @@
     { id: 744, name: 'Dawid', lang: 'PL' },
     { id: 849, name: 'Ana', lang: 'SL' },
   ];
+
+  const scenarioToggle = $('scenarioToggle');
+  const scenarioHint = $('scenarioHint');
+  const suggestionsRow = $('suggestionsRow');
+  const suggestionsBar = $('suggestionsBar');
+  const emptyTitle = $('emptyTitle');
+  const emptyLede = $('emptyLede');
+
+  function currentScenario() {
+    return scenarios.find((s) => s.id === selectedScenarioId) || scenarios[0];
+  }
+
+  const SCENARIO_ICONS = {
+    claims: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v5c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-3z"/><path d="M9 12l2 2 4-4"/></svg>`,
+    hotline: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V10l8-5 8 5v11"/><path d="M9 21v-6h6v6"/><path d="M4 21h16"/></svg>`,
+  };
+  const SCENARIO_TAGS = {
+    claims: 'Insurance',
+    hotline: 'Public sector',
+  };
+
+  function renderScenarios() {
+    scenarioToggle.innerHTML = '';
+    scenarios.forEach((s) => {
+      const isActive = s.id === selectedScenarioId;
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      tab.className = 'scenario-tab' + (isActive ? ' active' : '');
+      const icon = SCENARIO_ICONS[s.id] || '';
+      const tag = SCENARIO_TAGS[s.id] || '';
+      tab.innerHTML = `
+        <span class="scenario-tab-icon" aria-hidden="true">${icon}</span>
+        <span>${s.shortLabel || s.label}</span>
+        ${tag ? `<span class="scenario-tab-sub">· ${tag}</span>` : ''}`;
+      tab.onclick = () => selectScenario(s.id);
+      scenarioToggle.appendChild(tab);
+    });
+    const s = currentScenario();
+    if (s && scenarioHint) {
+      scenarioHint.innerHTML = `<b>${s.label}.</b> ${s.description}`;
+    }
+  }
+
+  function renderSuggestions() {
+    suggestionsRow.innerHTML = '';
+    const s = currentScenario();
+    const items = s?.suggestions || [];
+    suggestionsBar.style.display = items.length ? '' : 'none';
+    items.forEach((text) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'suggestion-chip';
+      b.textContent = text;
+      b.title = text;
+      b.onclick = () => {
+        input.value = text;
+        autoResize();
+        input.focus();
+      };
+      suggestionsRow.appendChild(b);
+    });
+  }
+
+  function applyScenarioEmptyState() {
+    const s = currentScenario();
+    if (!s) return;
+    if (emptyTitle) emptyTitle.textContent = s.label;
+    if (emptyLede) emptyLede.textContent = s.description;
+  }
+
+  async function selectScenario(id, { auto = false } = {}) {
+    if (id === selectedScenarioId && !auto) return;
+    selectedScenarioId = id;
+    // A scenario swap changes the system prompt, so start a fresh session.
+    sessionId = null;
+    renderScenarios();
+    renderSuggestions();
+    applyScenarioEmptyState();
+    resetThread();
+    // Auto-greet only on explicit user action — browsers block autoplay otherwise.
+    if (!auto) {
+      await startScenarioConversation();
+    }
+  }
+
+  async function startScenarioConversation() {
+    const s = currentScenario();
+    if (!s) return;
+    thread.innerHTML = '';
+    const pending = addMessage({ role: 'assistant', text: 'typing' });
+    try {
+      const r = await fetch('/api/scenario/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scenarioId: s.id, voiceId: selectedVoiceId, sessionId }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      sessionId = d.sessionId;
+      pending.remove();
+      addMessage({
+        role: 'assistant',
+        text: d.greeting,
+        audioUrl: `data:${d.audioMime};base64,${d.audio}`,
+        meta: `${s.label} · Kugel Audio · ${d.sampleRate}Hz`,
+      });
+      input.focus();
+    } catch (e) {
+      pending.remove();
+      showError(`Couldn't start scenario: ${e.message}`);
+      resetThread();
+    }
+  }
+
+  function resetThread() {
+    thread.innerHTML = '';
+    const s = currentScenario();
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.id = 'emptyState';
+    empty.innerHTML = `
+      <h2 id="emptyTitle">${s ? s.label : 'Voice Agent'}</h2>
+      <div class="lede" id="emptyLede">${s ? s.description : ''}</div>
+      <button id="heroStartBtn" class="hero-cta">
+        <span class="pulse"></span>
+        Anruf starten
+      </button>
+      <div class="hint">der Agent meldet sich zuerst · <kbd>⌘</kbd> <kbd>↵</kbd> antworten · <kbd>Esc</kbd> Live beenden</div>`;
+    thread.appendChild(empty);
+    empty.querySelector('#heroStartBtn')?.addEventListener('click', startScenarioConversation);
+  }
+
+  async function loadScenarios() {
+    try {
+      const r = await fetch('/api/scenarios');
+      const d = await r.json();
+      scenarios = d.scenarios || [];
+      selectedScenarioId = d.defaultScenarioId || (scenarios[0] && scenarios[0].id) || null;
+    } catch {
+      scenarios = [];
+    }
+    renderScenarios();
+    renderSuggestions();
+    applyScenarioEmptyState();
+  }
 
   function renderVoices() {
     voiceRow.innerHTML = '';
@@ -748,7 +1021,7 @@
       const r = await fetch('/api/converse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voiceId: selectedVoiceId, sessionId }),
+        body: JSON.stringify({ text, voiceId: selectedVoiceId, sessionId, scenarioId: selectedScenarioId }),
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
@@ -787,15 +1060,7 @@
   sendBtn.addEventListener('click', send);
   clearBtn.addEventListener('click', () => {
     sessionId = null;
-    thread.innerHTML = '';
-    const empty = document.createElement('div');
-    empty.className = 'empty-state';
-    empty.id = 'emptyState';
-    empty.innerHTML = `
-      <h2>Voice Agent</h2>
-      <div class="lede">A conversational AI running on IBM watsonx.ai with Llama 3.3 70B. Responses are spoken aloud through KugelAudio neural voices.</div>
-      <div class="hint">Press <kbd>⌘</kbd> <kbd>↵</kbd> to send · <kbd>🎙</kbd> to dictate</div>`;
-    thread.appendChild(empty);
+    resetThread();
   });
 
   // ─── Live voice mode ─────────────────────────────────
@@ -804,7 +1069,7 @@
   const orbState = $('orbState');
   const liveTranscript = $('liveTranscript');
   const goLiveBtn = $('goLiveBtn');
-  const heroLiveBtn = $('heroLiveBtn');
+  const heroStartBtn = $('heroStartBtn');
   const liveStopBtn = $('liveStopBtn');
   const SRctor = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -1017,7 +1282,7 @@
       const r = await fetch('/api/converse/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voiceId: selectedVoiceId, sessionId }),
+        body: JSON.stringify({ text, voiceId: selectedVoiceId, sessionId, scenarioId: selectedScenarioId }),
       });
       if (!r.ok || !r.body) throw new Error(`stream HTTP ${r.status}`);
 
@@ -1070,7 +1335,7 @@
   }
 
   goLiveBtn?.addEventListener('click', liveStart);
-  heroLiveBtn?.addEventListener('click', liveStart);
+  heroStartBtn?.addEventListener('click', startScenarioConversation);
   liveStopBtn?.addEventListener('click', liveStop);
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && liveActive) liveStop();
@@ -1172,6 +1437,7 @@
   }
 
   renderVoices();
+  loadScenarios();
   checkHealth();
   input.focus();
 </script>
