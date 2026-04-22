@@ -577,13 +577,14 @@
   }
   #liveOverlay.active { display: flex; }
   .live-orb {
+    --mic-level: 0;
     width: 200px; height: 200px;
     border-radius: 50%;
     border: 1px solid var(--border);
     background: var(--bg-1);
     display: flex; align-items: center; justify-content: center;
     position: relative;
-    transition: all 300ms;
+    transition: border-color 300ms, background 300ms;
   }
   .live-orb::after {
     content: '';
@@ -591,14 +592,54 @@
     inset: -20px;
     border-radius: 50%;
     border: 1px solid transparent;
-    transition: all 400ms;
+    transition: border-color 300ms;
   }
   .live-orb.listening { border-color: #10a86e; background: rgba(16,168,110,0.04); }
-  .live-orb.listening::after { border-color: rgba(16,168,110,0.2); transform: scale(1.05); }
+  .live-orb.listening::after {
+    border-color: rgba(16,168,110,0.25);
+    border-width: calc(1px + var(--mic-level) * 4px);
+    transform: scale(calc(1.05 + var(--mic-level) * 0.25));
+    opacity: calc(0.35 + var(--mic-level) * 0.65);
+  }
+  .live-orb.listening {
+    transform: scale(calc(1 + var(--mic-level) * 0.04));
+  }
   .live-orb.thinking { border-color: var(--fg-3); background: var(--bg-1); }
   .live-orb.thinking::after { border-color: transparent; }
   .live-orb.speaking { border-color: var(--fg); background: var(--bg-2); }
   .live-orb.speaking::after { border-color: rgba(10,10,10,0.1); transform: scale(1.1); }
+
+  .live-meter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--fg-3);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .live-meter .bar {
+    width: 80px; height: 4px;
+    background: var(--bg-2);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .live-meter .fill {
+    height: 100%;
+    width: calc(var(--mic-level, 0) * 100%);
+    background: linear-gradient(90deg, #10a86e, #10a86e 70%, #f59e0b);
+    transition: width 60ms linear;
+  }
+  .live-warn {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: #b45309;
+    text-align: center;
+    max-width: 440px;
+    line-height: 1.5;
+  }
+  .live-warn.hidden { display: none; }
 
   .orb-inner {
     font-family: var(--mono);
@@ -738,7 +779,9 @@
   <div id="liveOrb" class="live-orb">
     <div class="orb-inner" id="orbState">idle</div>
   </div>
+  <div class="live-meter"><span>Mic</span><span class="bar"><span class="fill" id="micFill"></span></span></div>
   <div id="liveTranscript" class="live-transcript empty">Say something to start…</div>
+  <div id="liveWarn" class="live-warn hidden"></div>
   <div class="live-hint">Just speak. The assistant listens, replies, and waits for your next question.</div>
   <button class="live-stop" id="liveStopBtn">End conversation</button>
 </div>
@@ -865,11 +908,23 @@
     }
   }
 
+  // Entry point for the hero "Anruf starten" button. Opens the live overlay,
+  // plays the agent's greeting through the shared AudioContext, then hands off
+  // to the live-listening loop so the conversation is fully hands-free.
   async function startScenarioConversation() {
     const s = currentScenario();
     if (!s) return;
-    thread.innerHTML = '';
-    const pending = addMessage({ role: 'assistant', text: 'typing' });
+    const ready = await ensureLiveReady();
+    if (!ready) return;
+
+    liveActive = true;
+    liveOverlay.classList.add('active');
+    hideLiveWarn();
+    setOrbState('speaking');
+    liveBuffer = '';
+    liveTranscript.className = 'live-transcript';
+    liveTranscript.textContent = '';
+
     try {
       const r = await fetch('/api/scenario/start', {
         method: 'POST',
@@ -879,18 +934,20 @@
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       sessionId = d.sessionId;
-      pending.remove();
+
+      thread.innerHTML = '';
       addMessage({
         role: 'assistant',
         text: d.greeting,
-        audioUrl: `data:${d.audioMime};base64,${d.audio}`,
         meta: `${s.label} · Kugel Audio · ${d.sampleRate}Hz`,
       });
-      input.focus();
+      liveTranscript.textContent = d.greeting;
+
+      await playBase64Wav(d.audio);
+      if (liveActive) startLiveListening();
     } catch (e) {
-      pending.remove();
-      showError(`Couldn't start scenario: ${e.message}`);
-      resetThread();
+      showError(`Konnte Anruf nicht starten: ${e.message}`);
+      liveStop();
     }
   }
 
@@ -1078,9 +1135,16 @@
   let liveAudio = null;          // legacy HTMLAudioElement (unused once audioCtx is alive)
   let liveSilenceTimer = null;
   let liveBuffer = '';
-  let audioCtx = null;           // created on user gesture in liveStart()
+  let audioCtx = null;           // created on user gesture in ensureLiveReady()
   let currentSource = null;      // active AudioBufferSourceNode, for stop()
+  let micStream = null;          // persistent mic MediaStream for the level meter
+  let micAnalyser = null;
+  let micMeterRaf = null;
+  let watchdogTimer = null;      // fires if no speech is ever picked up
   const LIVE_SILENCE_MS = 800;
+  const WATCHDOG_MS = 9000;
+  const liveWarn = $('liveWarn');
+  const micFill = $('micFill');
 
   // Decode base64 WAV → AudioBuffer and play through the shared AudioContext.
   // Resolves when playback ends. Using AudioContext (not <audio>) because
@@ -1126,45 +1190,102 @@
     if (liveSilenceTimer) { clearTimeout(liveSilenceTimer); liveSilenceTimer = null; }
   }
 
-  async function liveStart() {
+  // Explicitly grant mic + unlock AudioContext on a user gesture. Keeps the
+  // mic stream alive so we can drive a level meter — this is how the user
+  // sees that the mic is actually capturing even if transcription is silent.
+  async function ensureLiveReady() {
     if (!SRctor) {
       showError('Live voice mode needs Chrome or Edge (Web Speech API).');
-      return;
+      return false;
     }
-    // Explicit mic permission
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-      s.getTracks().forEach(t => t.stop());
+      if (!micStream || !micStream.getTracks().some(t => t.readyState === 'live')) {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
     } catch (e) {
-      showError('Microphone access denied — enable it and try again.');
-      return;
+      showError('Mikrofonzugriff verweigert — Berechtigung erteilen und erneut versuchen.');
+      return false;
     }
-    // Unlock AudioContext on the same user gesture so later programmatic
-    // playback isn't blocked by the browser's autoplay policy.
     try {
       if (!audioCtx) {
         const Ctx = window.AudioContext || window.webkitAudioContext;
         audioCtx = new Ctx();
       }
       if (audioCtx.state === 'suspended') await audioCtx.resume();
+      if (!micAnalyser) {
+        const source = audioCtx.createMediaStreamSource(micStream);
+        micAnalyser = audioCtx.createAnalyser();
+        micAnalyser.fftSize = 512;
+        micAnalyser.smoothingTimeConstant = 0.6;
+        source.connect(micAnalyser);
+        startMicMeter();
+      }
     } catch (e) {
-      console.warn('AudioContext init failed', e);
+      console.warn('AudioContext setup failed', e);
     }
+    return true;
+  }
+
+  function startMicMeter() {
+    if (micMeterRaf) return;
+    const buf = new Uint8Array(micAnalyser.fftSize);
+    const loop = () => {
+      micMeterRaf = requestAnimationFrame(loop);
+      micAnalyser.getByteTimeDomainData(buf);
+      let sumSq = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = (buf[i] - 128) / 128;
+        sumSq += v * v;
+      }
+      const rms = Math.sqrt(sumSq / buf.length);
+      const level = Math.min(1, rms * 6); // normalise: speaking ~0.3 rms → level 1
+      liveOrb.style.setProperty('--mic-level', level.toFixed(3));
+      if (micFill) micFill.style.width = `${Math.round(level * 100)}%`;
+    };
+    loop();
+  }
+
+  function stopMicMeter() {
+    if (micMeterRaf) { cancelAnimationFrame(micMeterRaf); micMeterRaf = null; }
+    liveOrb.style.setProperty('--mic-level', 0);
+    if (micFill) micFill.style.width = '0%';
+  }
+
+  function clearWatchdog() {
+    if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  }
+
+  function showLiveWarn(msg) {
+    if (!liveWarn) return;
+    liveWarn.textContent = msg;
+    liveWarn.classList.remove('hidden');
+  }
+  function hideLiveWarn() {
+    if (!liveWarn) return;
+    liveWarn.classList.add('hidden');
+  }
+
+  async function liveStart() {
+    const ok = await ensureLiveReady();
+    if (!ok) return;
     liveActive = true;
     liveOverlay.classList.add('active');
     liveBuffer = '';
+    hideLiveWarn();
     liveTranscript.className = 'live-transcript empty';
-    liveTranscript.textContent = 'Say something to start…';
+    liveTranscript.textContent = 'Sprechen Sie, um zu starten …';
     startLiveListening();
   }
 
   function liveStop() {
     liveActive = false;
     clearLiveSilenceTimer();
+    clearWatchdog();
     if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; }
     if (currentSource) { try { currentSource.stop(); } catch {} currentSource = null; }
     if (liveAudio) { liveAudio.pause(); liveAudio.src = ''; liveAudio = null; }
     liveOverlay.classList.remove('active');
+    hideLiveWarn();
     setOrbState('idle');
   }
 
@@ -1172,7 +1293,7 @@
     if (!liveActive) return;
     setOrbState('listening');
     const v = voices.find(x => x.id === selectedVoiceId);
-    const lang = ({ DE: 'de-DE', EN: 'en-US', NL: 'nl-NL', PL: 'pl-PL', SL: 'sl-SI' })[v?.lang] || 'en-US';
+    const lang = ({ DE: 'de-DE', EN: 'en-US', NL: 'nl-NL', PL: 'pl-PL', SL: 'sl-SI' })[v?.lang] || 'de-DE';
 
     liveRecog = new SRctor();
     liveRecog.continuous = true;
@@ -1180,10 +1301,24 @@
     liveRecog.lang = lang;
 
     liveBuffer = '';
+    hideLiveWarn();
     liveTranscript.className = 'live-transcript empty';
-    liveTranscript.textContent = 'Listening…';
+    liveTranscript.textContent = 'Ich höre zu …';
+
+    // Watchdog: if Web Speech never fires onspeechstart/onresult within 9s,
+    // hint the user that we're not hearing anything (mic or network issue).
+    clearWatchdog();
+    watchdogTimer = setTimeout(() => {
+      if (liveActive && !liveBuffer) {
+        showLiveWarn('Keine Sprache erkannt. Mikro-Pegel oben muss ausschlagen, wenn Sie sprechen.');
+      }
+    }, WATCHDOG_MS);
+
+    liveRecog.onspeechstart = () => { clearWatchdog(); hideLiveWarn(); };
 
     liveRecog.onresult = (ev) => {
+      clearWatchdog();
+      hideLiveWarn();
       let finalText = '';
       let interimText = '';
       for (let i = 0; i < ev.results.length; i++) {
@@ -1208,13 +1343,18 @@
 
     liveRecog.onerror = (ev) => {
       if (ev.error === 'no-speech' || ev.error === 'aborted') return;
-      showError(`Live mic: ${ev.error}`);
+      if (ev.error === 'network') {
+        showLiveWarn('Web-Speech-API offline — Spracherkennung braucht Internet. Weiter mit Tastatur unten.');
+      } else {
+        showError(`Live mic: ${ev.error}`);
+      }
       // try to recover
       if (liveActive) setTimeout(() => startLiveListening(), 800);
     };
 
     liveRecog.onend = async () => {
       clearLiveSilenceTimer();
+      clearWatchdog();
       if (!liveActive) return;
       if (liveBuffer.trim().length > 1) {
         await liveSubmit(liveBuffer.trim());
