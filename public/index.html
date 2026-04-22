@@ -743,7 +743,7 @@
       <div class="lede" id="emptyLede">Wähle oben ein Szenario — der Agent meldet sich auf Deutsch, du antwortest per Stimme oder Text.</div>
       <button id="heroStartBtn" class="hero-cta">
         <span class="pulse"></span>
-        Anruf starten
+        Gespräch starten
       </button>
       <div class="hint">der Agent meldet sich zuerst · <kbd>⌘</kbd> <kbd>↵</kbd> antworten · <kbd>Esc</kbd> Live beenden</div>
     </div>
@@ -908,7 +908,7 @@
     }
   }
 
-  // Entry point for the hero "Anruf starten" button. Opens the live overlay,
+  // Entry point for the hero "Gespräch starten" button. Opens the live overlay,
   // plays the agent's greeting through the shared AudioContext, then hands off
   // to the live-listening loop so the conversation is fully hands-free.
   async function startScenarioConversation() {
@@ -946,7 +946,7 @@
       await playBase64Wav(d.audio);
       if (liveActive) startLiveListening();
     } catch (e) {
-      showError(`Konnte Anruf nicht starten: ${e.message}`);
+      showError(`Konnte Gespräch nicht starten: ${e.message}`);
       liveStop();
     }
   }
@@ -962,7 +962,7 @@
       <div class="lede" id="emptyLede">${s ? s.description : ''}</div>
       <button id="heroStartBtn" class="hero-cta">
         <span class="pulse"></span>
-        Anruf starten
+        Gespräch starten
       </button>
       <div class="hint">der Agent meldet sich zuerst · <kbd>⌘</kbd> <kbd>↵</kbd> antworten · <kbd>Esc</kbd> Live beenden</div>`;
     thread.appendChild(empty);
