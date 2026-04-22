@@ -216,6 +216,36 @@
     font-size: 11px;
     color: var(--fg-3);
   }
+  .hero-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 12px 22px;
+    background: var(--fg);
+    color: var(--bg);
+    border: 1px solid var(--fg);
+    border-radius: 999px;
+    cursor: pointer;
+    margin: 4px 0 18px;
+    transition: transform 120ms ease, background 120ms;
+    letter-spacing: -0.01em;
+  }
+  .hero-cta:hover { transform: scale(1.02); background: #000; }
+  .hero-cta .pulse {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 0 rgba(16,168,110,0.7);
+    animation: pulse 1.6s infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(16,168,110,0.7); }
+    70% { box-shadow: 0 0 0 10px rgba(16,168,110,0); }
+    100% { box-shadow: 0 0 0 0 rgba(16,168,110,0); }
+  }
+
   .empty-state .hint kbd {
     font-family: var(--mono);
     background: var(--bg-1);
@@ -545,8 +575,12 @@
   <div class="thread" id="thread">
     <div class="empty-state" id="emptyState">
       <h2>Voice Agent</h2>
-      <div class="lede">A conversational AI running on IBM watsonx.ai with Llama 3.3 70B. Responses are spoken aloud through KugelAudio neural voices.</div>
-      <div class="hint">Press <kbd>⌘</kbd> <kbd>↵</kbd> to send · <kbd>🎙</kbd> to dictate</div>
+      <div class="lede">A hands-free conversational AI running on IBM watsonx.ai with Llama 3.3 70B. Speak, and KugelAudio speaks back — no buttons between turns.</div>
+      <button id="heroLiveBtn" class="hero-cta">
+        <span class="pulse"></span>
+        Tap to start live conversation
+      </button>
+      <div class="hint">or type below · <kbd>⌘</kbd> <kbd>↵</kbd> to send · <kbd>Esc</kbd> to exit live</div>
     </div>
   </div>
 </main>
@@ -770,6 +804,7 @@
   const orbState = $('orbState');
   const liveTranscript = $('liveTranscript');
   const goLiveBtn = $('goLiveBtn');
+  const heroLiveBtn = $('heroLiveBtn');
   const liveStopBtn = $('liveStopBtn');
   const SRctor = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -778,7 +813,7 @@
   let liveAudio = null;
   let liveSilenceTimer = null;
   let liveBuffer = '';
-  const LIVE_SILENCE_MS = 1500;  // auto-submit after this long of silence
+  const LIVE_SILENCE_MS = 800;  // auto-submit after this long of silence
 
   function setOrbState(s) {
     liveOrb.classList.remove('listening', 'thinking', 'speaking');
@@ -887,43 +922,103 @@
     liveTranscript.className = 'live-transcript';
     liveTranscript.textContent = text;
 
-    // mirror the turn into the main thread so the transcript survives
     addMessage({ role: 'user', text });
     const pending = addMessage({ role: 'assistant', text: 'typing' });
 
+    // Per-turn audio queue: sentences may arrive out of order but we play
+    // strictly by index so cadence stays right.
+    const audioByIdx = new Map();
+    let nextToPlay = 0;
+    let speakingStarted = false;
+    let streamDone = false;
+    let fullTextSoFar = '';
+    let finalMeta = null;
+    const t0 = Date.now();
+
+    const playNextIfReady = async () => {
+      if (!liveActive) return;
+      while (audioByIdx.has(nextToPlay)) {
+        const chunk = audioByIdx.get(nextToPlay);
+        audioByIdx.delete(nextToPlay);
+        nextToPlay++;
+        if (!speakingStarted) {
+          speakingStarted = true;
+          setOrbState('speaking');
+        }
+        try {
+          liveAudio = new Audio(`data:audio/wav;base64,${chunk.audio}`);
+          await new Promise((resolve) => {
+            liveAudio.onended = resolve;
+            liveAudio.onerror = resolve;
+            liveAudio.play().catch(resolve);
+          });
+          liveAudio = null;
+        } catch (e) {
+          liveAudio = null;
+        }
+        if (!liveActive) return;
+      }
+      // Queue empty — if stream finished, go back to listening.
+      if (streamDone) {
+        pending.remove();
+        addMessage({
+          role: 'assistant',
+          text: fullTextSoFar.trim(),
+          meta: finalMeta || `llama-3-3-70b · streamed`,
+        });
+        if (liveActive) startLiveListening();
+      }
+    };
+
     try {
-      const r = await fetch('/api/converse', {
+      const r = await fetch('/api/converse/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, voiceId: selectedVoiceId, sessionId }),
       });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        throw new Error(err.message || `HTTP ${r.status}`);
-      }
-      const d = await r.json();
-      sessionId = d.sessionId;
-      pending.remove();
-      addMessage({
-        role: 'assistant',
-        text: d.responseText,
-        audioUrl: `data:${d.audioMime};base64,${d.audio}`,
-        meta: `llama-3-3-70b · <b>${d.processingTime}ms</b> · ${d.sampleRate}Hz`,
-      });
+      if (!r.ok || !r.body) throw new Error(`stream HTTP ${r.status}`);
 
-      if (!liveActive) return;
-      setOrbState('speaking');
-      liveTranscript.textContent = d.responseText;
-      liveAudio = new Audio(`data:${d.audioMime};base64,${d.audio}`);
-      liveAudio.onended = () => {
-        liveAudio = null;
-        if (liveActive) startLiveListening();
-      };
-      liveAudio.onerror = () => {
-        liveAudio = null;
-        if (liveActive) startLiveListening();
-      };
-      await liveAudio.play();
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // split by SSE record boundary
+        let sep;
+        while ((sep = buf.indexOf('\n\n')) !== -1) {
+          const record = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const lines = record.split('\n');
+          let event = 'message', data = '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) event = line.slice(7).trim();
+            else if (line.startsWith('data: ')) data += line.slice(6);
+          }
+          if (!data) continue;
+          let payload;
+          try { payload = JSON.parse(data); } catch { continue; }
+
+          if (event === 'session') {
+            sessionId = payload.sessionId;
+          } else if (event === 'delta') {
+            fullTextSoFar += payload.text;
+            liveTranscript.textContent = fullTextSoFar;
+          } else if (event === 'sentence') {
+            audioByIdx.set(payload.index, payload);
+            playNextIfReady();
+          } else if (event === 'done') {
+            fullTextSoFar = payload.responseText || fullTextSoFar;
+            finalMeta = `llama-3-3-70b · <b>${payload.processingTime}ms</b> · streamed`;
+          } else if (event === 'error') {
+            throw new Error(payload.message || 'stream error');
+          }
+        }
+      }
+      streamDone = true;
+      playNextIfReady();
     } catch (e) {
       pending.remove();
       showError(e.message);
@@ -932,6 +1027,7 @@
   }
 
   goLiveBtn?.addEventListener('click', liveStart);
+  heroLiveBtn?.addEventListener('click', liveStart);
   liveStopBtn?.addEventListener('click', liveStop);
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && liveActive) liveStop();

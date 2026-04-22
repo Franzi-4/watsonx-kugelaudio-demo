@@ -80,6 +80,67 @@ class WatsonxClient {
   }
 
   /**
+   * Streaming chat completion via /ml/v1/text/chat_stream (OpenAI-style SSE).
+   * Calls onDelta(textChunk) for each token chunk as it arrives.
+   * Returns { fullText, usage } once the stream closes.
+   */
+  async chatStream(messages, { modelId, maxTokens = 300, temperature = 0.7, onDelta } = {}) {
+    if (!this.projectId) throw new Error('WATSONX_PROJECT_ID is required for chat');
+
+    const token = await this._ensureToken();
+    const response = await this.client.post(
+      '/ml/v1/text/chat_stream',
+      {
+        model_id: modelId || this.modelId,
+        project_id: this.projectId,
+        messages,
+        max_tokens: maxTokens,
+        temperature,
+      },
+      {
+        params: { version: this.apiVersion },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        },
+        responseType: 'stream',
+      },
+    );
+
+    let buffer = '';
+    let fullText = '';
+    let usage;
+
+    return new Promise((resolve, reject) => {
+      response.data.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // retain partial last line for next chunk
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+          const payload = trimmed.slice(5).trim();
+          if (payload === '[DONE]') continue;
+          try {
+            const obj = JSON.parse(payload);
+            const delta = obj?.choices?.[0]?.delta?.content;
+            if (delta) {
+              fullText += delta;
+              onDelta?.(delta);
+            }
+            if (obj?.usage) usage = obj.usage;
+          } catch {
+            // ignore malformed SSE chunks
+          }
+        }
+      });
+      response.data.on('end', () => resolve({ fullText, usage }));
+      response.data.on('error', reject);
+    });
+  }
+
+  /**
    * Back-compat wrapper so the existing voice pipeline keeps working.
    * Ignores agentId / conversationId — the pipeline already tracks
    * conversation history on its session object and calls chat() directly

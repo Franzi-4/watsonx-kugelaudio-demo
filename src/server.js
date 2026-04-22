@@ -202,6 +202,128 @@ app.post('/api/converse', async (req, res) => {
 });
 
 /**
+ * Streaming variant of /api/converse.
+ * Streams tokens from watsonx.ai as they arrive and runs per-sentence TTS,
+ * emitting Server-Sent Events so the client can start playing audio while
+ * the rest of the response is still generating. Cuts time-to-first-audio
+ * from ~5s to ~3s.
+ *
+ * Events:
+ *   event: session   data: {sessionId}
+ *   event: delta     data: {text}           // every LLM token chunk
+ *   event: sentence  data: {text, audio (b64 WAV), sampleRate, index}
+ *   event: done      data: {responseText, intent, processingTime, usage}
+ *   event: error     data: {message}
+ */
+app.post('/api/converse/stream', async (req, res) => {
+  const t0 = Date.now();
+  const { text, sessionId: providedSessionId, voiceId, language } = req.body || {};
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    return res.status(400).json({ error: 'text is required' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  const send = (event, payload) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  try {
+    const sessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    if (!voicePipeline.activeSessions.has(sessionId)) {
+      voicePipeline.createSession(sessionId, { language: language || 'en' });
+    }
+    if (voiceId !== undefined) {
+      voicePipeline.voiceConfig.voiceId = Number(voiceId);
+    }
+    const session = voicePipeline.getSession(sessionId);
+    send('session', { sessionId });
+
+    // Build conversation history for the model
+    const systemPrompt = voicePipeline._buildSystemPrompt();
+    const history = (session.context.conversation.messages || []).slice(-8).map((m) => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.text,
+    }));
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...history,
+      { role: 'user', content: text },
+    ];
+
+    // Sentence buffer — TTS in parallel, client plays by index.
+    const voiceIdForTts = voicePipeline.voiceConfig.voiceId;
+    const MIN_CHARS = 20; // first chunk can be tiny to minimise time-to-first-audio
+    let pending = '';
+    let sentenceIndex = 0;
+    const ttsPromises = [];
+
+    const runTts = (chunk, idx) => {
+      const p = kugelAudioClient.textToSpeech(chunk, { voiceId: voiceIdForTts })
+        .then((tts) => {
+          send('sentence', {
+            index: idx,
+            text: chunk,
+            audio: pcmToWav(tts.audio, tts.sampleRate).toString('base64'),
+            sampleRate: tts.sampleRate,
+          });
+        })
+        .catch((e) => console.warn(`TTS chunk ${idx} failed: ${e.message}`));
+      ttsPromises.push(p);
+    };
+
+    const tryFlush = (force = false) => {
+      while (true) {
+        const match = pending.match(/^([\s\S]*?[.!?])(\s+|$)/);
+        if (match && match[1].length >= MIN_CHARS) {
+          runTts(match[1].trim(), sentenceIndex++);
+          pending = pending.slice(match[0].length);
+          continue;
+        }
+        if (force && pending.trim().length > 0) {
+          runTts(pending.trim(), sentenceIndex++);
+          pending = '';
+        }
+        break;
+      }
+    };
+
+    const { fullText } = await watsonxClient.chatStream(messages, {
+      maxTokens: 180,  // tighter responses — live voice is better with short turns
+      temperature: 0.7,
+      onDelta: (d) => {
+        pending += d;
+        send('delta', { text: d });
+        tryFlush(false);
+      },
+    });
+    tryFlush(true);
+    await Promise.all(ttsPromises);
+
+    // Persist to session memory so follow-up turns have context
+    session.messageCount++;
+    session.context.conversation.messages.push(
+      { role: 'user', text, timestamp: new Date().toISOString() },
+      { role: 'assistant', text: fullText, timestamp: new Date().toISOString() },
+    );
+
+    send('done', {
+      responseText: fullText,
+      processingTime: Date.now() - t0,
+    });
+    res.end();
+  } catch (error) {
+    console.error('stream error:', error);
+    send('error', { message: error.message });
+    res.end();
+  }
+});
+
+/**
  * Initiate a New Voice Call
  * POST /api/call
  *
