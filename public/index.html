@@ -882,12 +882,6 @@
 <div class="scenario-bar" id="scenarioBar">
   <div class="scenario-toggle" role="tablist" id="scenarioToggle"></div>
 </div>
-<div class="scenario-hint" id="scenarioHint"></div>
-
-<div class="suggestions-bar" id="suggestionsBar">
-  <span class="suggestions-label">Beispiele</span>
-  <div id="suggestionsRow" style="display:flex;gap:6px;overflow-x:auto;flex:1"></div>
-</div>
 
 <div class="voice-bar">
   <span class="voice-label">voice</span>
@@ -898,12 +892,12 @@
   <div class="thread" id="thread">
     <div class="empty-state" id="emptyState">
       <h2 id="emptyTitle">Voice Agent</h2>
-      <div class="lede" id="emptyLede">Wähle oben ein Szenario — der Agent meldet sich auf Deutsch, du antwortest per Stimme oder Text.</div>
+      <div class="lede hidden" id="emptyLede"></div>
       <button id="heroStartBtn" class="hero-cta">
         <span class="pulse"></span>
         Gespräch starten
       </button>
-      <div class="hint">der Agent meldet sich zuerst · <kbd>⌘</kbd> <kbd>↵</kbd> antworten · <kbd>Esc</kbd> Live beenden</div>
+      <div class="hint"><kbd>⌘</kbd> <kbd>↵</kbd> senden · <kbd>Esc</kbd> beenden</div>
     </div>
   </div>
 </main>
@@ -935,20 +929,14 @@
 
 <div id="liveOverlay">
   <div id="liveOrb" class="live-orb">
-    <div class="orb-ring orb-ring-3"></div>
-    <div class="orb-ring orb-ring-2"></div>
-    <div class="orb-ring orb-ring-1"></div>
-    <canvas id="orbWave" width="400" height="400"></canvas>
     <div class="orb-inner" id="orbState">idle</div>
   </div>
-  <div class="live-meter"><span>Mic</span><span class="bar"><span class="fill" id="micFill"></span></span></div>
-  <div id="liveTranscript" class="live-transcript empty">Say something to start…</div>
+  <div id="liveTranscript" class="live-transcript empty">Sprich einfach los …</div>
   <div id="liveWarn" class="live-warn hidden"></div>
   <div class="live-fallback">
     <input id="liveFallbackInput" type="text" placeholder="oder tippen, falls das Mikro nicht geht …" autocomplete="off" />
     <button id="liveFallbackSend" type="button">Senden</button>
   </div>
-  <div class="live-hint">Einfach sprechen — oder tippen. Der Agent antwortet und wartet auf deine nächste Eingabe.</div>
   <button class="live-stop" id="liveStopBtn">Gespräch beenden</button>
 </div>
 
@@ -989,9 +977,6 @@
   ];
 
   const scenarioToggle = $('scenarioToggle');
-  const scenarioHint = $('scenarioHint');
-  const suggestionsRow = $('suggestionsRow');
-  const suggestionsBar = $('suggestionsBar');
   const emptyTitle = $('emptyTitle');
   const emptyLede = $('emptyLede');
 
@@ -999,13 +984,9 @@
     return scenarios.find((s) => s.id === selectedScenarioId) || scenarios[0];
   }
 
-  const SCENARIO_ICONS = {
-    claims: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v5c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-3z"/><path d="M9 12l2 2 4-4"/></svg>`,
-    hotline: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V10l8-5 8 5v11"/><path d="M9 21v-6h6v6"/><path d="M4 21h16"/></svg>`,
-  };
-  const SCENARIO_TAGS = {
-    claims: 'Insurance',
-    hotline: 'Public sector',
+  const SHORT_LABELS = {
+    claims: 'Schadensmeldung',
+    hotline: 'Bürgerhotline',
   };
 
   function renderScenarios() {
@@ -1017,40 +998,14 @@
       tab.setAttribute('role', 'tab');
       tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
       tab.className = 'scenario-tab' + (isActive ? ' active' : '');
-      const icon = SCENARIO_ICONS[s.id] || '';
-      const tag = SCENARIO_TAGS[s.id] || '';
-      tab.innerHTML = `
-        <span class="scenario-tab-icon" aria-hidden="true">${icon}</span>
-        <span>${s.shortLabel || s.label}</span>
-        ${tag ? `<span class="scenario-tab-sub">· ${tag}</span>` : ''}`;
+      tab.textContent = SHORT_LABELS[s.id] || s.shortLabel || s.label;
       tab.onclick = () => selectScenario(s.id);
       scenarioToggle.appendChild(tab);
     });
-    const s = currentScenario();
-    if (s && scenarioHint) {
-      scenarioHint.innerHTML = `<b>${s.label}.</b> ${s.description}`;
-    }
   }
 
-  function renderSuggestions() {
-    suggestionsRow.innerHTML = '';
-    const s = currentScenario();
-    const items = s?.suggestions || [];
-    suggestionsBar.style.display = items.length ? '' : 'none';
-    items.forEach((text) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'suggestion-chip';
-      b.textContent = text;
-      b.title = text;
-      b.onclick = () => {
-        input.value = text;
-        autoResize();
-        input.focus();
-      };
-      suggestionsRow.appendChild(b);
-    });
-  }
+  // No more suggestion chips — landing stays minimal.
+  function renderSuggestions() {}
 
   function applyScenarioEmptyState() {
     const s = currentScenario();
@@ -1218,6 +1173,8 @@
       audio.src = audioUrl;
       audio.className = 'msg-audio';
       audio.autoplay = true;
+      audio.playbackRate = 1.18;
+      audio.addEventListener('loadedmetadata', () => { audio.playbackRate = 1.18; });
       msg.appendChild(audio);
     }
     if (meta) {
@@ -1364,6 +1321,9 @@
           try {
             const src = audioCtx.createBufferSource();
             src.buffer = buffer;
+            // KugelAudio voices read at a deliberate cadence — speed up
+            // ~18% so the agent feels responsive, still plenty articulate.
+            src.playbackRate.value = 1.18;
             src.connect(audioCtx.destination);
             currentSource = src;
             src.onended = () => {
