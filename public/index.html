@@ -659,6 +659,42 @@
     line-height: 1.5;
   }
   .live-warn.hidden { display: none; }
+  .live-warn a { color: inherit; text-decoration: underline; }
+
+  /* Fallback text input inside the live overlay for browsers where
+     Web Speech isn't actually working (Dia, Arc, Brave in some configs). */
+  .live-fallback {
+    width: min(520px, 90vw);
+    display: flex;
+    gap: 6px;
+    padding: 6px 6px 6px 12px;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    align-items: center;
+  }
+  .live-fallback input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    font: inherit;
+    font-size: 14px;
+    color: var(--fg);
+    padding: 6px 0;
+  }
+  .live-fallback input::placeholder { color: var(--fg-4); }
+  .live-fallback button {
+    font: inherit;
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--fg);
+    background: var(--fg);
+    color: var(--bg);
+    cursor: pointer;
+  }
+  .live-fallback button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .orb-inner {
     font-family: var(--mono);
@@ -805,8 +841,12 @@
   <div class="live-meter"><span>Mic</span><span class="bar"><span class="fill" id="micFill"></span></span></div>
   <div id="liveTranscript" class="live-transcript empty">Say something to start…</div>
   <div id="liveWarn" class="live-warn hidden"></div>
-  <div class="live-hint">Just speak. The assistant listens, replies, and waits for your next question.</div>
-  <button class="live-stop" id="liveStopBtn">End conversation</button>
+  <div class="live-fallback">
+    <input id="liveFallbackInput" type="text" placeholder="oder tippen, falls das Mikro nicht geht …" autocomplete="off" />
+    <button id="liveFallbackSend" type="button">Senden</button>
+  </div>
+  <div class="live-hint">Einfach sprechen — oder tippen. Der Agent antwortet und wartet auf deine nächste Eingabe.</div>
+  <button class="live-stop" id="liveStopBtn">Gespräch beenden</button>
 </div>
 
 <script>
@@ -1165,9 +1205,14 @@
   let micMeterRaf = null;
   let watchdogTimer = null;      // fires if no speech is ever picked up
   const LIVE_SILENCE_MS = 800;
-  const WATCHDOG_MS = 9000;
+  const AUDIOSTART_WATCHDOG_MS = 2500;   // if onaudiostart never fires → browser blocks Web Speech
+  const SPEECH_WATCHDOG_MS = 9000;       // if mic's alive but no words recognised
   const liveWarn = $('liveWarn');
   const micFill = $('micFill');
+  const liveFallbackInput = $('liveFallbackInput');
+  const liveFallbackSend = $('liveFallbackSend');
+  let audioStartWatchdog = null;
+  let speechWatchdog = null;
 
   // Decode base64 WAV → AudioBuffer and play through the shared AudioContext.
   // Resolves when playback ends. Using AudioContext (not <audio>) because
@@ -1304,6 +1349,8 @@
 
   function clearWatchdog() {
     if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+    if (audioStartWatchdog) { clearTimeout(audioStartWatchdog); audioStartWatchdog = null; }
+    if (speechWatchdog) { clearTimeout(speechWatchdog); speechWatchdog = null; }
   }
 
   function showLiveWarn(msg) {
@@ -1356,14 +1403,26 @@
     liveTranscript.className = 'live-transcript empty';
     liveTranscript.textContent = 'Ich höre zu …';
 
-    // Watchdog: if Web Speech never fires onspeechstart/onresult within 9s,
-    // hint the user that we're not hearing anything (mic or network issue).
+    // Two-stage watchdog so we can differentiate the failure modes:
+    //   1) onaudiostart never fires (~2.5s) → the browser itself blocks the
+    //      Web Speech backend (Dia, Arc, Brave, Firefox). Tell user to type.
+    //   2) onaudiostart fires but no speech/result (~9s) → mic is alive but
+    //      not picking up words. Could be silent mic or noisy env.
     clearWatchdog();
-    watchdogTimer = setTimeout(() => {
-      if (liveActive && !liveBuffer) {
-        showLiveWarn('Keine Sprache erkannt. Mikro-Pegel oben muss ausschlagen, wenn Sie sprechen.');
-      }
-    }, WATCHDOG_MS);
+    audioStartWatchdog = setTimeout(() => {
+      if (!liveActive) return;
+      showLiveWarn('Dein Browser blockt die Spracherkennung. Bitte Chrome oder Edge nutzen — oder hier unten tippen.');
+      liveFallbackInput?.focus();
+    }, AUDIOSTART_WATCHDOG_MS);
+
+    liveRecog.onaudiostart = () => {
+      if (audioStartWatchdog) { clearTimeout(audioStartWatchdog); audioStartWatchdog = null; }
+      speechWatchdog = setTimeout(() => {
+        if (liveActive && !liveBuffer) {
+          showLiveWarn('Keine Sprache erkannt. Mikro-Pegel muss ausschlagen, wenn Sie sprechen.');
+        }
+      }, SPEECH_WATCHDOG_MS);
+    };
 
     liveRecog.onspeechstart = () => { clearWatchdog(); hideLiveWarn(); };
 
@@ -1528,6 +1587,26 @@
   goLiveBtn?.addEventListener('click', liveStart);
   heroStartBtn?.addEventListener('click', startScenarioConversation);
   liveStopBtn?.addEventListener('click', liveStop);
+
+  // Fallback typing inside the live overlay — works in browsers where
+  // Web Speech is blocked (Dia, Arc, etc.). Routes through the same
+  // liveSubmit path so the agent answers via Kugel TTS just like voice.
+  async function liveFallbackSubmit() {
+    const text = liveFallbackInput?.value?.trim();
+    if (!text || !liveActive) return;
+    liveFallbackInput.value = '';
+    if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; }
+    clearLiveSilenceTimer();
+    clearWatchdog();
+    await liveSubmit(text);
+  }
+  liveFallbackSend?.addEventListener('click', liveFallbackSubmit);
+  liveFallbackInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      liveFallbackSubmit();
+    }
+  });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && liveActive) liveStop();
   });
