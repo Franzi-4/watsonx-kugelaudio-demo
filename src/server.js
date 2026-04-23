@@ -46,6 +46,7 @@ app.use(express.static('public'));
 const kugelAudioClient = new KugelAudioClient({
   apiKey: process.env.KUGELAUDIO_API_KEY,
   apiUrl: process.env.KUGELAUDIO_API_URL,
+  modelId: process.env.KUGELAUDIO_MODEL_ID || 'kugel-2-turbo',
 });
 
 const watsonxClient = new WatsonxClient({
@@ -73,7 +74,10 @@ const voicePipeline = new VoicePipeline({
   voiceConfig: {
     voiceId: process.env.KUGELAUDIO_VOICE_ID || 'default',
     language: process.env.KUGELAUDIO_LANGUAGE || 'de',
-    speed: Number(process.env.KUGELAUDIO_SPEED) || 1.15,
+    // `speed` not supported by voice 977 / kugel-2-turbo (returns 500 NameError).
+    // Only sent if KUGELAUDIO_SPEED is explicitly set; otherwise client-side
+    // <audio>.playbackRate handles speedup.
+    speed: process.env.KUGELAUDIO_SPEED ? Number(process.env.KUGELAUDIO_SPEED) : undefined,
     cfgScale: Number(process.env.KUGELAUDIO_CFG_SCALE) || 2.0,
     normalize: true,
   },
