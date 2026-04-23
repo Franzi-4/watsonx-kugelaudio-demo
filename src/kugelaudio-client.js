@@ -63,6 +63,7 @@ class KugelAudioClient {
     if (options.sampleRate !== undefined) body.sample_rate = options.sampleRate;
     if (options.normalize !== undefined) body.normalize = options.normalize;
     if (options.language !== undefined) body.language = options.language;
+    if (options.speed !== undefined) body.speed = options.speed;
 
     const response = await this._request({
       method: 'POST',

@@ -54,6 +54,17 @@ const watsonxClient = new WatsonxClient({
   projectId: process.env.WATSONX_PROJECT_ID,
 });
 
+// Per-scenario fine-tuned deployment ids (optional). If set, streaming
+// requests for that scenario route to /ml/v1/deployments/{id}/text/chat_stream
+// instead of the foundation-model endpoint.
+const SCENARIO_DEPLOYMENTS = {
+  claims: process.env.WATSONX_DEPLOYMENT_ID_CLAIMS || null,
+  hotline: process.env.WATSONX_DEPLOYMENT_ID_HOTLINE || null,
+};
+for (const [id, dep] of Object.entries(SCENARIO_DEPLOYMENTS)) {
+  if (dep) console.log(`[watsonx] scenario "${id}" → deployment ${dep}`);
+}
+
 // Initialize voice pipeline
 const voicePipeline = new VoicePipeline({
   kugelAudioClient,
@@ -61,7 +72,10 @@ const voicePipeline = new VoicePipeline({
   defaultAgentId: process.env.DEFAULT_AGENT_ID || 'customer-service-agent',
   voiceConfig: {
     voiceId: process.env.KUGELAUDIO_VOICE_ID || 'default',
-    language: 'en',
+    language: process.env.KUGELAUDIO_LANGUAGE || 'de',
+    speed: Number(process.env.KUGELAUDIO_SPEED) || 1.15,
+    cfgScale: Number(process.env.KUGELAUDIO_CFG_SCALE) || 2.0,
+    normalize: true,
   },
 });
 
@@ -201,10 +215,10 @@ app.post('/api/scenario/start', async (req, res) => {
     }
 
     const greeting = scenario.greeting;
-    const tts = await kugelAudioClient.textToSpeech(greeting, {
-      voiceId: voicePipeline.voiceConfig.voiceId,
-      language: scenario.defaultLanguage || 'de',
-    });
+    const tts = await kugelAudioClient.textToSpeech(
+      greeting,
+      voicePipeline.ttsOptions(scenario.defaultLanguage || 'de'),
+    );
     const wav = pcmToWav(tts.audio, tts.sampleRate);
 
     // Seed the conversation history so the LLM sees its own opening turn.
@@ -335,14 +349,20 @@ app.post('/api/converse/stream', async (req, res) => {
     ];
 
     // Sentence buffer — TTS in parallel, client plays by index.
-    const voiceIdForTts = voicePipeline.voiceConfig.voiceId;
-    const MIN_CHARS = 20; // first chunk can be tiny to minimise time-to-first-audio
+    // Only flush on sentence terminators (. ! ?) — Kugel docs explicitly warn
+    // that per-clause flushing forces a cold model prefill each segment and
+    // wrecks prosody. First chunk is allowed slightly shorter for TTFA, but
+    // still must end on a full sentence so the voice stays coherent.
+    const ttsOpts = voicePipeline.ttsOptions(effectiveLanguage);
+    const FIRST_MIN_CHARS = 40;
+    const NEXT_MIN_CHARS = 60;
+    const SENTENCE_BOUNDARY = /^([\s\S]*?[.!?])(\s+|$)/;
     let pending = '';
     let sentenceIndex = 0;
     const ttsPromises = [];
 
     const runTts = (chunk, idx) => {
-      const p = kugelAudioClient.textToSpeech(chunk, { voiceId: voiceIdForTts })
+      const p = kugelAudioClient.textToSpeech(chunk, ttsOpts)
         .then((tts) => {
           send('sentence', {
             index: idx,
@@ -357,8 +377,9 @@ app.post('/api/converse/stream', async (req, res) => {
 
     const tryFlush = (force = false) => {
       while (true) {
-        const match = pending.match(/^([\s\S]*?[.!?])(\s+|$)/);
-        if (match && match[1].length >= MIN_CHARS) {
+        const minChars = sentenceIndex === 0 ? FIRST_MIN_CHARS : NEXT_MIN_CHARS;
+        const match = pending.match(SENTENCE_BOUNDARY);
+        if (match && match[1].length >= minChars) {
           runTts(match[1].trim(), sentenceIndex++);
           pending = pending.slice(match[0].length);
           continue;
@@ -371,7 +392,9 @@ app.post('/api/converse/stream', async (req, res) => {
       }
     };
 
+    const deploymentId = SCENARIO_DEPLOYMENTS[session.scenarioId] || undefined;
     const { fullText } = await watsonxClient.chatStream(messages, {
+      deploymentId,
       maxTokens: 180,  // tighter responses — live voice is better with short turns
       temperature: 0.7,
       onDelta: (d) => {

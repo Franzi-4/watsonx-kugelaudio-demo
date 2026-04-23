@@ -44,33 +44,38 @@ class WatsonxClient {
 
   /**
    * Foundation-model chat completion via /ml/v1/text/chat.
+   * If deploymentId is provided, routes through the deployment endpoint
+   * (/ml/v1/deployments/{id}/text/chat) so fine-tuned models can be used.
    * messages: [{ role: 'system' | 'user' | 'assistant', content: string }]
    * Returns { text, usage, modelId }.
    */
-  async chat(messages, { modelId, maxTokens = 300, temperature = 0.7 } = {}) {
-    if (!this.projectId) throw new Error('WATSONX_PROJECT_ID is required for chat');
+  async chat(messages, { modelId, deploymentId, maxTokens = 300, temperature = 0.7 } = {}) {
+    if (!deploymentId && !this.projectId) throw new Error('WATSONX_PROJECT_ID is required for chat');
     if (!Array.isArray(messages) || messages.length === 0) {
       throw new Error('messages must be a non-empty array');
     }
 
     const token = await this._ensureToken();
-    const { data } = await this.client.post(
-      '/ml/v1/text/chat',
-      {
-        model_id: modelId || this.modelId,
-        project_id: this.projectId,
-        messages,
-        max_tokens: maxTokens,
-        temperature,
+    const url = deploymentId
+      ? `/ml/v1/deployments/${deploymentId}/text/chat`
+      : '/ml/v1/text/chat';
+    const body = deploymentId
+      ? { messages, max_tokens: maxTokens, temperature }
+      : {
+          model_id: modelId || this.modelId,
+          project_id: this.projectId,
+          messages,
+          max_tokens: maxTokens,
+          temperature,
+        };
+
+    const { data } = await this.client.post(url, body, {
+      params: { version: this.apiVersion },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
       },
-      {
-        params: { version: this.apiVersion },
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      },
-    );
+    });
 
     return {
       text: data?.choices?.[0]?.message?.content ?? '',
@@ -84,29 +89,31 @@ class WatsonxClient {
    * Calls onDelta(textChunk) for each token chunk as it arrives.
    * Returns { fullText, usage } once the stream closes.
    */
-  async chatStream(messages, { modelId, maxTokens = 300, temperature = 0.7, onDelta } = {}) {
-    if (!this.projectId) throw new Error('WATSONX_PROJECT_ID is required for chat');
+  async chatStream(messages, { modelId, deploymentId, maxTokens = 300, temperature = 0.7, onDelta } = {}) {
+    if (!deploymentId && !this.projectId) throw new Error('WATSONX_PROJECT_ID is required for chat');
 
     const token = await this._ensureToken();
-    const response = await this.client.post(
-      '/ml/v1/text/chat_stream',
-      {
-        model_id: modelId || this.modelId,
-        project_id: this.projectId,
-        messages,
-        max_tokens: maxTokens,
-        temperature,
+    const url = deploymentId
+      ? `/ml/v1/deployments/${deploymentId}/text/chat_stream`
+      : '/ml/v1/text/chat_stream';
+    const body = deploymentId
+      ? { messages, max_tokens: maxTokens, temperature }
+      : {
+          model_id: modelId || this.modelId,
+          project_id: this.projectId,
+          messages,
+          max_tokens: maxTokens,
+          temperature,
+        };
+    const response = await this.client.post(url, body, {
+      params: { version: this.apiVersion },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
       },
-      {
-        params: { version: this.apiVersion },
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          Accept: 'text/event-stream',
-        },
-        responseType: 'stream',
-      },
-    );
+      responseType: 'stream',
+    });
 
     let buffer = '';
     let fullText = '';

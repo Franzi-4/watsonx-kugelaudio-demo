@@ -1173,8 +1173,6 @@
       audio.src = audioUrl;
       audio.className = 'msg-audio';
       audio.autoplay = true;
-      audio.playbackRate = 1.18;
-      audio.addEventListener('loadedmetadata', () => { audio.playbackRate = 1.18; });
       msg.appendChild(audio);
     }
     if (meta) {
@@ -1321,9 +1319,6 @@
           try {
             const src = audioCtx.createBufferSource();
             src.buffer = buffer;
-            // KugelAudio voices read at a deliberate cadence — speed up
-            // ~18% so the agent feels responsive, still plenty articulate.
-            src.playbackRate.value = 1.18;
             src.connect(audioCtx.destination);
             currentSource = src;
             src.onended = () => {

@@ -30,11 +30,13 @@ class VoicePipeline {
     this.kugelAudioClient = config.kugelAudioClient;
     this.watsonxClient = config.watsonxClient;
     this.defaultAgentId = config.defaultAgentId;
-    this.voiceConfig = config.voiceConfig || {
+    this.voiceConfig = {
       voiceId: 'default',
-      language: 'en',
+      language: 'de',
       speed: 1.0,
-      pitch: 1.0,
+      cfgScale: 2.0,
+      normalize: true,
+      ...(config.voiceConfig || {}),
     };
 
     // Session management
@@ -131,10 +133,7 @@ class VoicePipeline {
       session.context.escalation.reason = intentResult.intent;
     }
 
-    const tts = await this.kugelAudioClient.textToSpeech(responseText, {
-      voiceId: this.voiceConfig.voiceId,
-      language: activeLanguage,
-    });
+    const tts = await this.kugelAudioClient.textToSpeech(responseText, this.ttsOptions(activeLanguage));
 
     session.messageCount++;
     session.context.conversation.messages.push(
@@ -153,6 +152,16 @@ class VoicePipeline {
       intent: intentResult.intent,
       escalated: intentResult.shouldEscalate,
       usage,
+    };
+  }
+
+  ttsOptions(language) {
+    return {
+      voiceId: this.voiceConfig.voiceId,
+      language: language || this.voiceConfig.language,
+      speed: this.voiceConfig.speed,
+      cfgScale: this.voiceConfig.cfgScale,
+      normalize: this.voiceConfig.normalize,
     };
   }
 

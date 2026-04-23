@@ -4,3 +4,7 @@ node_modules/
 smoke.mjs
 *.log
 .DS_Store
+
+# Generated training artifacts — keep seeds tracked, not amplified output
+src/agents/training/*.jsonl
+!src/agents/training/*.seed.jsonl
