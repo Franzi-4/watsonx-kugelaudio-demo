@@ -310,7 +310,7 @@
   }
   .empty-state {
     text-align: center;
-    padding: 80px 20px;
+    padding: 40px 20px 60px;
   }
   .empty-state h2 {
     color: var(--fg);
@@ -322,13 +322,116 @@
   .empty-state .lede {
     color: var(--fg-2);
     font-size: 13px;
-    max-width: 440px;
-    margin: 0 auto 24px;
+    max-width: 520px;
+    margin: 0 auto 28px;
   }
   .empty-state .hint {
     font-family: var(--mono);
     font-size: 11px;
     color: var(--fg-3);
+  }
+
+  /* Two-card scenario chooser on the empty state */
+  .scenario-choice {
+    max-width: 820px;
+    margin: 0 auto 28px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 14px;
+    text-align: left;
+  }
+  .scenario-choice-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 18px 18px 16px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    transition: border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+  }
+  .scenario-choice-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--fg);
+    opacity: 0;
+    transition: opacity 140ms ease;
+    border-radius: 12px 12px 0 0;
+  }
+  .scenario-choice-card:hover {
+    border-color: var(--border-2);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.05);
+  }
+  .scenario-choice-card:hover::before { opacity: 1; }
+
+  .scenario-choice-card .head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .scenario-choice-card .icon-badge {
+    width: 40px; height: 40px;
+    border-radius: 10px;
+    background: var(--bg-2);
+    color: var(--fg);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .scenario-choice-card .icon-badge svg { width: 20px; height: 20px; }
+  .scenario-choice-card .title {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .scenario-choice-card .tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--fg-3);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .scenario-choice-card .desc {
+    font-size: 13px;
+    color: var(--fg-2);
+    line-height: 1.55;
+  }
+  .scenario-choice-card .ideal {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--fg-3);
+    padding-top: 10px;
+    border-top: 1px dashed var(--border);
+    line-height: 1.5;
+  }
+  .scenario-choice-card .start {
+    align-self: flex-start;
+    margin-top: 4px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 9px 16px;
+    border-radius: 999px;
+    border: 1px solid var(--fg);
+    background: var(--fg);
+    color: var(--bg);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: transform 120ms ease, background 120ms;
+  }
+  .scenario-choice-card .start:hover { transform: scale(1.02); background: #000; }
+  .scenario-choice-card .start .pulse {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 0 rgba(16,168,110,0.7);
+    animation: pulse 1.6s infinite;
   }
   .hero-cta {
     display: inline-flex;
@@ -1016,20 +1119,50 @@
 
   function resetThread() {
     thread.innerHTML = '';
-    const s = currentScenario();
     const empty = document.createElement('div');
     empty.className = 'empty-state';
     empty.id = 'emptyState';
+
+    const cardsHtml = scenarios.map((s) => {
+      const icon = SCENARIO_ICONS[s.id] || '';
+      const tag = SCENARIO_TAGS[s.id] || '';
+      return `
+        <div class="scenario-choice-card" data-scenario="${s.id}">
+          <div class="head">
+            <span class="icon-badge" aria-hidden="true">${icon}</span>
+            <div>
+              <div class="title">${s.label}</div>
+              ${tag ? `<div class="tag">${tag}</div>` : ''}
+            </div>
+          </div>
+          <div class="desc">${s.description}</div>
+          ${s.idealFor ? `<div class="ideal">${s.idealFor}</div>` : ''}
+          <button type="button" class="start" data-start="${s.id}">
+            <span class="pulse"></span>
+            Gespräch starten
+          </button>
+        </div>`;
+    }).join('');
+
     empty.innerHTML = `
-      <h2 id="emptyTitle">${s ? s.label : 'Voice Agent'}</h2>
-      <div class="lede" id="emptyLede">${s ? s.description : ''}</div>
-      <button id="heroStartBtn" class="hero-cta">
-        <span class="pulse"></span>
-        Gespräch starten
-      </button>
-      <div class="hint">der Agent meldet sich zuerst · <kbd>⌘</kbd> <kbd>↵</kbd> antworten · <kbd>Esc</kbd> Live beenden</div>`;
+      <h2>Voice Agent · IBM × Kugel Audio Demo</h2>
+      <div class="lede">Zwei deutsche Voice-Agents, beide mit watsonx.ai Llama 3.3 70B und Kugel-Audio-Readback. Wähle ein Szenario — der Agent meldet sich zuerst.</div>
+      <div class="scenario-choice">${cardsHtml}</div>
+      <div class="hint">oder unten tippen · <kbd>⌘</kbd> <kbd>↵</kbd> antworten · <kbd>Esc</kbd> Live beenden</div>`;
     thread.appendChild(empty);
-    empty.querySelector('#heroStartBtn')?.addEventListener('click', startScenarioConversation);
+
+    empty.querySelectorAll('[data-start]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-start');
+        if (id && id !== selectedScenarioId) {
+          selectedScenarioId = id;
+          sessionId = null;
+          renderScenarios();
+          renderSuggestions();
+        }
+        await startScenarioConversation();
+      });
+    });
   }
 
   async function loadScenarios() {
@@ -1043,7 +1176,10 @@
     }
     renderScenarios();
     renderSuggestions();
-    applyScenarioEmptyState();
+    // Replace the static initial empty state with the dual-scenario picker
+    // once scenarios are known — so the two cases are front-and-centre.
+    if (scenarios.length) resetThread();
+    else applyScenarioEmptyState();
   }
 
   function renderVoices() {
