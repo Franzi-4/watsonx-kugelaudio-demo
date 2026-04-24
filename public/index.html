@@ -1079,15 +1079,11 @@
     empty.id = 'emptyState';
 
     const cardsHtml = scenarios.map((s) => {
-      const icon = SCENARIO_ICONS[s.id] || '';
-      const tag = SCENARIO_TAGS[s.id] || '';
       return `
         <div class="scenario-choice-card" data-scenario="${s.id}">
           <div class="head">
-            <span class="icon-badge" aria-hidden="true">${icon}</span>
             <div>
               <div class="title">${s.label}</div>
-              ${tag ? `<div class="tag">${tag}</div>` : ''}
             </div>
           </div>
           <div class="desc">${s.description}</div>
@@ -1309,9 +1305,14 @@
   // Resolves when playback ends. Using AudioContext (not <audio>) because
   // sequential HTMLAudioElement.play() calls hit browser autoplay limits
   // once the original user-gesture activation token is consumed.
-  function playBase64Wav(b64) {
+  async function playBase64Wav(b64) {
+    if (!audioCtx) return;
+    // Chrome suspends AudioContext while Web Speech holds the mic — resume
+    // before every playback so response audio actually leaves the speakers.
+    if (audioCtx.state === 'suspended') {
+      try { await audioCtx.resume(); } catch (e) { console.warn('resume failed', e); }
+    }
     return new Promise((resolve) => {
-      if (!audioCtx) return resolve();
       const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
       audioCtx.decodeAudioData(
         bytes.buffer.slice(0),
