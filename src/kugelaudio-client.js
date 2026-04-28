@@ -4,7 +4,13 @@ class KugelAudioClient {
   constructor(config) {
     this.apiKey = config.apiKey;
     this.apiUrl = (config.apiUrl || 'https://api.kugelaudio.com/v1').replace(/\/$/, '');
-    this.defaultModelId = config.modelId || 'kugel-2-turbo';
+    // Streaming TTS is owned by the Python sidecar (tts_sidecar.py), which
+    // uses the official `kugelaudio` SDK with the same pattern as the
+    // reference benchmark script: persistent client, warm-up, full-text
+    // stream_async per turn. We proxy to it instead of reimplementing the
+    // WebSocket protocol in Node.
+    this.sidecarUrl = (config.sidecarUrl || process.env.TTS_SIDECAR_URL || 'http://127.0.0.1:3210').replace(/\/$/, '');
+    this.defaultModelId = config.modelId || 'kugel-2';
     this.maxRetries = config.maxRetries ?? 3;
     this.retryDelayMs = config.retryDelayMs ?? 500;
 
@@ -79,6 +85,78 @@ class KugelAudioClient {
       audioFormat: response.headers['x-audio-format'] || 'pcm_s16le',
       requestId: response.headers['x-request-id'],
     };
+  }
+
+  /**
+   * Stream a full-text synthesis through the Python sidecar and forward
+   * each audio chunk to `onAudio({ pcm, sampleRate, samples, idx })`.
+   *
+   * The sidecar uses the official `kugelaudio` SDK with a persistent client
+   * — exactly mirroring the colleague's reference script:
+   *     async for item in client.tts.stream_async(text=TEXT, model_id="kugel-2", language="de"):
+   *         if isinstance(item, AudioChunk): ...
+   *
+   * Returns the final stats { totalAudioSeconds }.
+   */
+  async streamFullTextTts(text, options = {}) {
+    if (!text || !text.trim()) throw new Error('text cannot be empty');
+    const body = {
+      text,
+      model_id: options.modelId || this.defaultModelId,
+    };
+    if (options.voiceId !== undefined) body.voice_id = Number(options.voiceId);
+    if (options.language !== undefined) body.language = options.language;
+    if (options.cfgScale !== undefined) body.cfg_scale = options.cfgScale;
+    if (options.normalize !== undefined) body.normalize = options.normalize;
+
+    const response = await axios.post(`${this.sidecarUrl}/tts/stream`, body, {
+      responseType: 'stream',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      timeout: 60000,
+    });
+
+    let totalSamples = 0;
+    let buf = '';
+    for await (const chunk of response.data) {
+      buf += chunk.toString('utf8');
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) !== -1) {
+        const record = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const lines = record.split('\n');
+        let event = 'message';
+        let data = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) event = line.slice(7).trim();
+          else if (line.startsWith('data: ')) data += line.slice(6);
+        }
+        if (!data) continue;
+        let payload;
+        try { payload = JSON.parse(data); } catch { continue; }
+        if (event === 'audio') {
+          totalSamples += payload.samples || 0;
+          options.onAudio?.({
+            pcm: Buffer.from(payload.pcm, 'base64'),
+            sampleRate: payload.sample_rate,
+            samples: payload.samples,
+            idx: payload.index,
+            encoding: payload.encoding || 'pcm_s16le',
+          });
+        } else if (event === 'error') {
+          throw new Error(`sidecar error: ${payload.message}`);
+        }
+      }
+    }
+    return { totalAudioSeconds: totalSamples / 24000 };
+  }
+
+  async sidecarHealthy() {
+    try {
+      const r = await axios.get(`${this.sidecarUrl}/health`, { timeout: 1500 });
+      return !!r.data?.ok;
+    } catch {
+      return false;
+    }
   }
 
   async healthCheck() {

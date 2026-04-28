@@ -1,0 +1,3 @@
+kugelaudio>=1.2.0
+fastapi>=0.110
+uvicorn>=0.27

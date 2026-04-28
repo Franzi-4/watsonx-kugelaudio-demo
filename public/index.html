@@ -1340,6 +1340,84 @@
     });
   }
 
+  // Gapless PCM playback for the streaming TTS path. Each chunk is raw
+  // pcm_s16le at the session's sample rate. Two protections against
+  // audible stutter:
+  //   1. Jitter buffer — collect JITTER_MS of audio before starting playback
+  //      so a brief network/TTS hiccup doesn't drain the queue.
+  //   2. Cursor never trails currentTime — scheduling always pushes forward,
+  //      so consecutive chunks line up sample-accurate on the audio clock.
+  const PCM_JITTER_MS = 220;
+  let pcmCursor = 0;                  // ctx-time at which the NEXT chunk should start
+  let pcmPending = [];                // pre-jitter buffer (AudioBuffers waiting to start)
+  let pcmStarted = false;
+  const pcmActiveSources = new Set();
+
+  function resetPcmStream() {
+    for (const s of pcmActiveSources) { try { s.stop(); } catch {} }
+    pcmActiveSources.clear();
+    pcmPending = [];
+    pcmStarted = false;
+    pcmCursor = 0;
+  }
+
+  function _scheduleAudioBuffer(buffer) {
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(audioCtx.destination);
+    const safeNow = audioCtx.currentTime + 0.005; // 5ms scheduling safety
+    const startAt = Math.max(pcmCursor, safeNow);
+    src.start(startAt);
+    pcmCursor = startAt + buffer.duration;
+    pcmActiveSources.add(src);
+    src.onended = () => pcmActiveSources.delete(src);
+  }
+
+  function _decodePcm(b64, sampleRate) {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+    const buffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+    buffer.copyToChannel(float32, 0);
+    return buffer;
+  }
+
+  async function enqueuePcmChunk(b64, sampleRate) {
+    if (!audioCtx) return;
+    if (audioCtx.state === 'suspended') {
+      try { await audioCtx.resume(); } catch {}
+    }
+    const buffer = _decodePcm(b64, sampleRate);
+
+    if (!pcmStarted) {
+      pcmPending.push(buffer);
+      const buffered = pcmPending.reduce((s, b) => s + b.duration, 0);
+      if (buffered * 1000 < PCM_JITTER_MS) return;
+      // Anchor the cursor a hair into the future so the first scheduled
+      // start time is reachable, then drain the pre-buffer back-to-back.
+      pcmCursor = audioCtx.currentTime + 0.02;
+      for (const buf of pcmPending) _scheduleAudioBuffer(buf);
+      pcmPending = [];
+      pcmStarted = true;
+    } else {
+      _scheduleAudioBuffer(buffer);
+    }
+  }
+
+  function pcmStreamFinished() {
+    if (!audioCtx) return Promise.resolve();
+    // If we never crossed the jitter threshold (very short response), drain now.
+    if (!pcmStarted && pcmPending.length) {
+      pcmCursor = audioCtx.currentTime + 0.02;
+      for (const buf of pcmPending) _scheduleAudioBuffer(buf);
+      pcmPending = [];
+      pcmStarted = true;
+    }
+    const remaining = Math.max(0, pcmCursor - audioCtx.currentTime);
+    return new Promise((r) => setTimeout(r, remaining * 1000 + 40));
+  }
+
   function setOrbState(s) {
     liveOrb.classList.remove('listening', 'thinking', 'speaking');
     if (s && s !== 'idle') liveOrb.classList.add(s);
@@ -1473,6 +1551,7 @@
     clearWatchdog();
     if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; }
     if (currentSource) { try { currentSource.stop(); } catch {} currentSource = null; }
+    resetPcmStream();
     if (liveAudio) { liveAudio.pause(); liveAudio.src = ''; liveAudio = null; }
     liveOverlay.classList.remove('active');
     hideLiveWarn();
@@ -1580,45 +1659,13 @@
     addMessage({ role: 'user', text });
     const pending = addMessage({ role: 'assistant', text: 'typing' });
 
-    // Per-turn audio queue: sentences may arrive out of order but we play
-    // strictly by index so cadence stays right.
-    const audioByIdx = new Map();
-    let nextToPlay = 0;
+    // Streaming TTS: each `audio` event carries one PCM chunk that we
+    // schedule back-to-back on the AudioContext clock for gapless playback.
+    resetPcmStream();
     let speakingStarted = false;
     let streamDone = false;
     let fullTextSoFar = '';
     let finalMeta = null;
-    const t0 = Date.now();
-
-    let playing = false;  // ensure only one playback loop runs at a time
-    const playNextIfReady = async () => {
-      if (playing || !liveActive) return;
-      playing = true;
-      try {
-        while (audioByIdx.has(nextToPlay)) {
-          const chunk = audioByIdx.get(nextToPlay);
-          audioByIdx.delete(nextToPlay);
-          nextToPlay++;
-          if (!speakingStarted) {
-            speakingStarted = true;
-            setOrbState('speaking');
-          }
-          await playBase64Wav(chunk.audio);
-          if (!liveActive) return;
-        }
-      } finally {
-        playing = false;
-      }
-      if (streamDone) {
-        pending.remove();
-        addMessage({
-          role: 'assistant',
-          text: fullTextSoFar.trim(),
-          meta: finalMeta || `llama-3-3-70b · streamed`,
-        });
-        if (liveActive) startLiveListening();
-      }
-    };
 
     try {
       const r = await fetch('/api/converse/stream', {
@@ -1656,19 +1703,32 @@
           } else if (event === 'delta') {
             fullTextSoFar += payload.text;
             liveTranscript.textContent = fullTextSoFar;
-          } else if (event === 'sentence') {
-            audioByIdx.set(payload.index, payload);
-            playNextIfReady();
+          } else if (event === 'audio') {
+            if (!speakingStarted) { speakingStarted = true; setOrbState('speaking'); }
+            // Fire-and-forget so the SSE reader keeps draining while
+            // playback proceeds on the audio clock in the background.
+            enqueuePcmChunk(payload.pcm, payload.sampleRate);
           } else if (event === 'done') {
             fullTextSoFar = payload.responseText || fullTextSoFar;
-            finalMeta = `llama-3-3-70b · <b>${payload.processingTime}ms</b> · streamed`;
+            const llm = payload.llmMs != null ? ` · LLM <b>${payload.llmMs}ms</b>` : '';
+            const ttfa = payload.ttsTtfa != null ? ` · TTS-TTFA <b>${payload.ttsTtfa}ms</b>` : '';
+            finalMeta = `llama-3-3-70b → kugel-2 · <b>${payload.processingTime}ms</b>${llm}${ttfa}`;
+            streamDone = true;
           } else if (event === 'error') {
             throw new Error(payload.message || 'stream error');
           }
         }
       }
-      streamDone = true;
-      playNextIfReady();
+      // Wait for the queued PCM to finish playing before listening again,
+      // otherwise the agent would talk over itself.
+      await pcmStreamFinished();
+      pending.remove();
+      addMessage({
+        role: 'assistant',
+        text: fullTextSoFar.trim(),
+        meta: finalMeta || `llama-3-3-70b · streamed`,
+      });
+      if (liveActive) startLiveListening();
     } catch (e) {
       pending.remove();
       showError(e.message);

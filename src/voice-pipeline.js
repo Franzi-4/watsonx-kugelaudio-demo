@@ -30,12 +30,15 @@ class VoicePipeline {
     this.kugelAudioClient = config.kugelAudioClient;
     this.watsonxClient = config.watsonxClient;
     this.defaultAgentId = config.defaultAgentId;
+    // Only carry values that the caller actually set. cfgScale / normalize /
+    // sampleRate left undefined → not forwarded → SDK falls through to its
+    // own defaults (cfg_scale=2.0, normalize=True, sample_rate=24000), which
+    // is exactly what the colleague's reference script does. Setting them
+    // here would make our `stream_async` call diverge from the script even
+    // if the values match — better to be byte-identical.
     this.voiceConfig = {
       voiceId: 'default',
       language: 'de',
-      speed: 1.0,
-      cfgScale: 2.0,
-      normalize: true,
       ...(config.voiceConfig || {}),
     };
 

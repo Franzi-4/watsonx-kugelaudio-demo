@@ -2,10 +2,14 @@ import dotenv from 'dotenv';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
+import { spawn } from 'child_process';
+import { existsSync } from 'fs';
+import path from 'path';
 import KugelAudioClient from './kugelaudio-client.js';
 import WatsonxClient from './watsonx-client.js';
 import VoicePipeline from './voice-pipeline.js';
 import { listScenarios, getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
+import { cleanLlmText } from './agents/text-cleanup.js';
 
 // Wrap raw PCM16 LE bytes in a minimal WAV container so browsers can <audio src>.
 function pcmToWav(pcm, sampleRate, channels = 1, bitsPerSample = 16) {
@@ -74,12 +78,14 @@ const voicePipeline = new VoicePipeline({
   voiceConfig: {
     voiceId: process.env.KUGELAUDIO_VOICE_ID || 'default',
     language: process.env.KUGELAUDIO_LANGUAGE || 'de',
-    // `speed` not supported by voice 977 / kugel-2-turbo (returns 500 NameError).
-    // Only sent if KUGELAUDIO_SPEED is explicitly set; otherwise client-side
-    // <audio>.playbackRate handles speedup.
+    // Anything below is left undefined unless the operator explicitly sets
+    // an env override — undefined means "don't include in the SDK call",
+    // which is what keeps us byte-identical with the reference script.
     speed: process.env.KUGELAUDIO_SPEED ? Number(process.env.KUGELAUDIO_SPEED) : undefined,
-    cfgScale: Number(process.env.KUGELAUDIO_CFG_SCALE) || 2.0,
-    normalize: true,
+    cfgScale: process.env.KUGELAUDIO_CFG_SCALE ? Number(process.env.KUGELAUDIO_CFG_SCALE) : undefined,
+    normalize: process.env.KUGELAUDIO_NORMALIZE !== undefined
+      ? process.env.KUGELAUDIO_NORMALIZE === 'true'
+      : undefined,
   },
 });
 
@@ -303,8 +309,8 @@ app.post('/api/converse', async (req, res) => {
  * Events:
  *   event: session   data: {sessionId}
  *   event: delta     data: {text}           // every LLM token chunk
- *   event: sentence  data: {text, audio (b64 WAV), sampleRate, index}
- *   event: done      data: {responseText, intent, processingTime, usage}
+ *   event: audio     data: {pcm (b64 PCM s16le), sampleRate, samples, index, encoding}
+ *   event: done      data: {responseText, processingTime, ttfa}
  *   event: error     data: {message}
  */
 app.post('/api/converse/stream', async (req, res) => {
@@ -352,74 +358,83 @@ app.post('/api/converse/stream', async (req, res) => {
       { role: 'user', content: text },
     ];
 
-    // Sentence buffer — TTS in parallel, client plays by index.
-    // Only flush on sentence terminators (. ! ?) — Kugel docs explicitly warn
-    // that per-clause flushing forces a cold model prefill each segment and
-    // wrecks prosody. First chunk is allowed slightly shorter for TTFA, but
-    // still must end on a full sentence so the voice stays coherent.
+    // Two-stage flow that matches the colleague's reference pattern:
+    //   1) Stream LLM tokens to the browser as they arrive (so the user sees
+    //      text appear live).
+    //   2) Once LLM is done, hand the COMPLETE text to the Kugel SDK in
+    //      Python — `client.tts.stream_async(text=TEXT, ...)` — and forward
+    //      each AudioChunk to the browser. Full-text-in lets the model plan
+    //      prosody at paragraph level, which is what restores voice quality
+    //      vs. token-incremental streaming.
     const ttsOpts = voicePipeline.ttsOptions(effectiveLanguage);
-    const FIRST_MIN_CHARS = 40;
-    const NEXT_MIN_CHARS = 60;
-    const SENTENCE_BOUNDARY = /^([\s\S]*?[.!?])(\s+|$)/;
-    let pending = '';
-    let sentenceIndex = 0;
-    const ttsPromises = [];
 
-    const runTts = (chunk, idx) => {
-      const p = kugelAudioClient.textToSpeech(chunk, ttsOpts)
-        .then((tts) => {
-          send('sentence', {
-            index: idx,
-            text: chunk,
-            audio: pcmToWav(tts.audio, tts.sampleRate).toString('base64'),
-            sampleRate: tts.sampleRate,
+    let fullText;
+    let llmMs;
+    if (req.body?.skipLlm) {
+      // Dev escape hatch — useful when watsonx is rate-limited and you only
+      // want to exercise the TTS sidecar path. The user's text becomes the
+      // assistant's response verbatim. Drop this if it ever ships beyond dev.
+      fullText = text;
+      llmMs = 0;
+      send('delta', { text });
+    } else {
+      const deploymentId = SCENARIO_DEPLOYMENTS[session.scenarioId] || undefined;
+      const llmStartedAt = Date.now();
+      const result = await watsonxClient.chatStream(messages, {
+        deploymentId,
+        maxTokens: 180,  // tighter responses — live voice is better with short turns
+        temperature: 0.7,
+        onDelta: (d) => send('delta', { text: d }),
+      });
+      fullText = result.fullText;
+      llmMs = Date.now() - llmStartedAt;
+    }
+
+    // Strip llama's habitual echo-question tag-ons before they hit TTS —
+    // the live `delta` stream stays raw (user sees what the model said),
+    // but everything from here forward (TTS, session history, done event)
+    // uses the cleaned version so what's heard matches what's persisted.
+    const spokenText = cleanLlmText(fullText, { language: effectiveLanguage });
+
+    let audioIdx = 0;
+    let firstAudioAt = null;
+    const ttsStartedAt = Date.now();
+    try {
+      await kugelAudioClient.streamFullTextTts(spokenText, {
+        voiceId: ttsOpts.voiceId,
+        language: ttsOpts.language,
+        cfgScale: ttsOpts.cfgScale,
+        normalize: ttsOpts.normalize,
+        onAudio: ({ pcm, sampleRate, samples }) => {
+          if (firstAudioAt === null) firstAudioAt = Date.now() - ttsStartedAt;
+          send('audio', {
+            index: audioIdx++,
+            pcm: pcm.toString('base64'),
+            sampleRate,
+            samples,
+            encoding: 'pcm_s16le',
           });
-        })
-        .catch((e) => console.warn(`TTS chunk ${idx} failed: ${e.message}`));
-      ttsPromises.push(p);
-    };
+        },
+      });
+    } catch (e) {
+      console.warn(`TTS sidecar stream failed: ${e.message}`);
+      send('error', { message: `tts: ${e.message}` });
+    }
 
-    const tryFlush = (force = false) => {
-      while (true) {
-        const minChars = sentenceIndex === 0 ? FIRST_MIN_CHARS : NEXT_MIN_CHARS;
-        const match = pending.match(SENTENCE_BOUNDARY);
-        if (match && match[1].length >= minChars) {
-          runTts(match[1].trim(), sentenceIndex++);
-          pending = pending.slice(match[0].length);
-          continue;
-        }
-        if (force && pending.trim().length > 0) {
-          runTts(pending.trim(), sentenceIndex++);
-          pending = '';
-        }
-        break;
-      }
-    };
-
-    const deploymentId = SCENARIO_DEPLOYMENTS[session.scenarioId] || undefined;
-    const { fullText } = await watsonxClient.chatStream(messages, {
-      deploymentId,
-      maxTokens: 180,  // tighter responses — live voice is better with short turns
-      temperature: 0.7,
-      onDelta: (d) => {
-        pending += d;
-        send('delta', { text: d });
-        tryFlush(false);
-      },
-    });
-    tryFlush(true);
-    await Promise.all(ttsPromises);
-
-    // Persist to session memory so follow-up turns have context
+    // Persist the cleaned text to session memory — follow-up turns then see
+    // a tidy history without the model's echo-question tag-ons influencing
+    // its next reply (otherwise it would learn the bad pattern from itself).
     session.messageCount++;
     session.context.conversation.messages.push(
       { role: 'user', text, timestamp: new Date().toISOString() },
-      { role: 'assistant', text: fullText, timestamp: new Date().toISOString() },
+      { role: 'assistant', text: spokenText, timestamp: new Date().toISOString() },
     );
 
     send('done', {
-      responseText: fullText,
+      responseText: spokenText,
       processingTime: Date.now() - t0,
+      llmMs,
+      ttsTtfa: firstAudioAt,
     });
     res.end();
   } catch (error) {
@@ -607,7 +622,71 @@ app.use((error, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 
+// Spawn the Python TTS sidecar as a child process so the dev experience is
+// `node src/server.js` and you get a working voice demo. The sidecar owns
+// the persistent KugelAudio SDK client (warm-up, connection reuse) — i.e.
+// the colleague's reference pattern, run by Python, not reimplemented here.
+async function startTtsSidecar() {
+  // node --watch restarts spawn a new server but the previous sidecar may
+  // still be alive (it's our child but signal delivery races the new boot).
+  // Skip the spawn if the port is already serving — the existing sidecar
+  // is fine to reuse, and double-spawning would just EADDRINUSE.
+  if (await kugelAudioClient.sidecarHealthy()) {
+    console.log('[tts sidecar] already running on', kugelAudioClient.sidecarUrl);
+    return null;
+  }
+
+  const venvPython = path.resolve('.venv-tts/bin/python');
+  if (!existsSync(venvPython)) {
+    console.warn(`[tts sidecar] ${venvPython} not found — skipping auto-start. Run: python3.11 -m venv .venv-tts && .venv-tts/bin/pip install -r requirements-tts.txt`);
+    return null;
+  }
+  if (!existsSync('tts_sidecar.py')) {
+    console.warn('[tts sidecar] tts_sidecar.py missing — skipping auto-start');
+    return null;
+  }
+
+  console.log('[tts sidecar] launching Python child process');
+  const child = spawn(venvPython, ['tts_sidecar.py'], {
+    env: {
+      ...process.env,
+      KUGELAUDIO_MODEL_ID: process.env.KUGELAUDIO_MODEL_ID || 'kugel-2',
+      TTS_SIDECAR_PORT: process.env.TTS_SIDECAR_PORT || '3210',
+      PYTHONUNBUFFERED: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    // Detach so node --watch SIGTERM on the parent doesn't cascade to the
+    // sidecar before its warm-up completes. We still kill on clean exit.
+    detached: false,
+  });
+
+  const tag = (line) => `[tts sidecar] ${line}`;
+  child.stdout.on('data', (b) => b.toString().split(/\r?\n/).filter(Boolean).forEach((l) => console.log(tag(l))));
+  child.stderr.on('data', (b) => b.toString().split(/\r?\n/).filter(Boolean).forEach((l) => console.warn(tag(l))));
+  child.on('exit', (code) => console.warn(`[tts sidecar] exited (code ${code})`));
+
+  const stop = () => { try { child.kill('SIGTERM'); } catch {} };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  process.once('exit', stop);
+  return child;
+}
+
 httpServer.listen(PORT, () => {
+  startTtsSidecar();
+
+  // Poll briefly so the boot log makes it obvious whether TTS is ready.
+  (async () => {
+    for (let i = 0; i < 30; i++) {
+      if (await kugelAudioClient.sidecarHealthy()) {
+        console.log('[tts sidecar] reachable on', kugelAudioClient.sidecarUrl);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    console.warn(`[tts sidecar] NOT reachable on ${kugelAudioClient.sidecarUrl} after 15s`);
+  })();
+
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║  KugelAudio × watsonx Orchestrate Voice AI Integration     ║

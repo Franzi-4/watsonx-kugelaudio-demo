@@ -5,6 +5,11 @@ smoke.mjs
 *.log
 .DS_Store
 
+# Local dev tooling — Claude Code state, Python venv for TTS sidecar
+.claude/
+.venv-tts/
+__pycache__/
+
 # Generated training artifacts — keep seeds tracked, not amplified output
 src/agents/training/*.jsonl
 !src/agents/training/*.seed.jsonl

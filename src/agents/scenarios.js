@@ -12,6 +12,10 @@ const SHARED_VOICE_RULES = [
   'Keine Markdown-Formatierung, keine Aufzählungszeichen, keine Emoji.',
   'Zahlen, Beträge, Daten, Uhrzeiten, Kfz-Kennzeichen und Policennummern werden ausgesprochen, wie sie geschrieben sind — kein IPA, keine Phonetikhinweise.',
   'Keine Floskeln wie "Gerne helfe ich Ihnen" — komme direkt zur Sache.',
+  'Stelle exakt eine Frage pro Antwort. Hänge NIE eine Echo-Frage oder Umformulierung an.',
+  'Falsch: "Wo ist der Schaden, welcher Ort?". Richtig: "Wo ist der Schaden?".',
+  'Falsch: "Wer ist beteiligt, also wer ist involviert?". Richtig: "Wer ist beteiligt?".',
+  'Achte auf korrekte Verbformen mit "Sie": "Können Sie", nicht "Kann Sie".',
 ].join(' ');
 
 export const scenarios = {
