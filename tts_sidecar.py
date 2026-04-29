@@ -111,9 +111,12 @@ async def tts_stream(req: StreamRequest):
         model_id=req.model_id or DEFAULT_MODEL,
         language=req.language or DEFAULT_LANGUAGE,
     )
-    voice_id = req.voice_id if req.voice_id is not None else DEFAULT_VOICE_ID
-    if voice_id is not None:
-        kwargs["voice_id"] = voice_id
+    # voice_id ONLY if the caller explicitly sent one. No env-var fallback —
+    # that lets the UI offer a "SDK default voice" mode (omit voice_id in
+    # the request body) which is exactly what the colleague's reference
+    # script does. Whatever default voice ships with the SDK is what plays.
+    if req.voice_id is not None:
+        kwargs["voice_id"] = req.voice_id
     if req.cfg_scale is not None:
         kwargs["cfg_scale"] = req.cfg_scale
     if req.sample_rate is not None:

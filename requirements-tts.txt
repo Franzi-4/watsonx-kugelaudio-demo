@@ -1,3 +1,6 @@
-kugelaudio>=1.2.0
+kugelaudio[livekit]>=1.2.0
 fastapi>=0.110
 uvicorn>=0.27
+livekit-agents>=1.5.0
+livekit-plugins-silero>=0.7.0
+python-dotenv>=1.0.0

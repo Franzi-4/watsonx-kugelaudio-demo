@@ -909,6 +909,9 @@
       <span class="pulse"></span>
       Start live conversation
     </button>
+    <button id="lkProbeBtn" title="LiveKit audio quality probe — bypasses our SSE/PCM scheduler" style="margin-left:8px;background:transparent;border:1px dashed var(--border-2);color:var(--fg-2);">
+      LiveKit-Audio-Test
+    </button>
   </div>
   <div class="composer-inner">
     <div class="composer-box">
@@ -940,6 +943,9 @@
   <button class="live-stop" id="liveStopBtn">Gespräch beenden</button>
 </div>
 
+<!-- LiveKit JS SDK (Phase 2a audio quality probe). Not on the critical path
+     for the existing SSE-based flow — only loaded for the LK-Probe button. -->
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.7/dist/livekit-client.umd.min.js"></script>
 <script>
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
@@ -955,6 +961,9 @@
   const errorBanner = $('errorBanner');
   const main = $('main');
 
+  // Default to a specific voice so consecutive requests stay on the same
+  // speaker. The "Zufall"-chip (voice_id null) lets the server pick a
+  // random voice each request — useful for testing, useless for a demo.
   let selectedVoiceId = 977;
   let sessionId = null;
   let sending = false;
@@ -974,6 +983,7 @@
     { id: 912, name: 'Rosa', lang: 'NL' },
     { id: 744, name: 'Dawid', lang: 'PL' },
     { id: 849, name: 'Ana', lang: 'SL' },
+    { id: null, name: 'Zufall', lang: '?' },
   ];
 
   const scenarioToggle = $('scenarioToggle');
@@ -1047,10 +1057,12 @@
     liveTranscript.textContent = '';
 
     try {
+      const startBody = { scenarioId: s.id, sessionId };
+      if (selectedVoiceId !== null) startBody.voiceId = selectedVoiceId;
       const r = await fetch('/api/scenario/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scenarioId: s.id, voiceId: selectedVoiceId, sessionId }),
+        body: JSON.stringify(startBody),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
@@ -1225,10 +1237,12 @@
     const pending = addMessage({ role: 'assistant', text: 'typing' });
 
     try {
+      const convBody = { text, sessionId, scenarioId: selectedScenarioId };
+      if (selectedVoiceId !== null) convBody.voiceId = selectedVoiceId;
       const r = await fetch('/api/converse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voiceId: selectedVoiceId, sessionId, scenarioId: selectedScenarioId }),
+        body: JSON.stringify(convBody),
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
@@ -1668,10 +1682,12 @@
     let finalMeta = null;
 
     try {
+      const reqBody = { text, sessionId, scenarioId: selectedScenarioId };
+      if (selectedVoiceId !== null) reqBody.voiceId = selectedVoiceId;
       const r = await fetch('/api/converse/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voiceId: selectedVoiceId, sessionId, scenarioId: selectedScenarioId }),
+        body: JSON.stringify(reqBody),
       });
       if (!r.ok || !r.body) throw new Error(`stream HTTP ${r.status}`);
 
@@ -1739,6 +1755,59 @@
   goLiveBtn?.addEventListener('click', liveStart);
   heroStartBtn?.addEventListener('click', startScenarioConversation);
   liveStopBtn?.addEventListener('click', liveStop);
+
+  // ─── Phase 2a: LiveKit audio-quality probe ───────────────────
+  // Joins a LiveKit room as a passive listener; the Python agent
+  // (livekit_agent.py) joins the same room and speaks one greeting via
+  // Kugel TTS over a native WebRTC audio track. The browser plays it
+  // through <audio> — no PCM scheduling, no per-chunk resampling.
+  // If this sounds clearly cleaner than our SSE flow, Phase 2b is worth it.
+  const lkProbeBtn = $('lkProbeBtn');
+  let lkRoom = null;
+  async function lkProbe() {
+    if (!window.LivekitClient) {
+      showError('LiveKit JS SDK nicht geladen — Reload?');
+      return;
+    }
+    const { Room, RoomEvent } = window.LivekitClient;
+    try {
+      lkProbeBtn.disabled = true;
+      lkProbeBtn.textContent = 'verbinde …';
+      const r = await fetch('/api/livekit/token?room=audio-probe-' + Date.now());
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error(e.message || `token HTTP ${r.status}`);
+      }
+      const { url, token } = await r.json();
+
+      if (lkRoom) { try { await lkRoom.disconnect(); } catch {} }
+      lkRoom = new Room({ adaptiveStream: false, dynacast: false });
+
+      lkRoom.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
+        if (track.kind === 'audio') {
+          // Native WebRTC playback — browser handles buffering, jitter,
+          // and resampling internally. This is the whole point of the probe.
+          const el = track.attach();
+          el.autoplay = true;
+          el.style.display = 'none';
+          document.body.appendChild(el);
+          lkProbeBtn.textContent = 'Agent spricht …';
+        }
+      });
+      lkRoom.on(RoomEvent.Disconnected, () => {
+        lkProbeBtn.disabled = false;
+        lkProbeBtn.textContent = 'LiveKit-Audio-Test';
+      });
+
+      await lkRoom.connect(url, token);
+      lkProbeBtn.textContent = 'warte auf Agent …';
+    } catch (e) {
+      showError(`LiveKit probe: ${e.message}`);
+      lkProbeBtn.disabled = false;
+      lkProbeBtn.textContent = 'LiveKit-Audio-Test';
+    }
+  }
+  lkProbeBtn?.addEventListener('click', lkProbe);
 
   // Fallback typing inside the live overlay — works in browsers where
   // Web Speech is blocked (Dia, Arc, etc.). Routes through the same

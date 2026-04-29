@@ -94,7 +94,7 @@ class VoicePipeline {
    * Process a user text turn: agent response + KugelAudio TTS.
    * Returns { userText, responseText, audio, sampleRate, audioFormat, intent, escalated, processingTime }.
    */
-  async processText(userText, sessionId, { language, scenarioId } = {}) {
+  async processText(userText, sessionId, { language, scenarioId, voiceId } = {}) {
     const startTime = Date.now();
     const session = this.getSession(sessionId);
 
@@ -136,7 +136,10 @@ class VoicePipeline {
       session.context.escalation.reason = intentResult.intent;
     }
 
-    const tts = await this.kugelAudioClient.textToSpeech(responseText, this.ttsOptions(activeLanguage));
+    const tts = await this.kugelAudioClient.textToSpeech(responseText, {
+      ...this.ttsOptions(activeLanguage),
+      voiceId,  // per-request override; undefined → SDK default voice
+    });
 
     session.messageCount++;
     session.context.conversation.messages.push(

@@ -5,6 +5,7 @@ import { createServer } from 'http';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 import path from 'path';
+import { AccessToken } from 'livekit-server-sdk';
 import KugelAudioClient from './kugelaudio-client.js';
 import WatsonxClient from './watsonx-client.js';
 import VoicePipeline from './voice-pipeline.js';
@@ -134,6 +135,49 @@ app.get('/api/health', async (req, res) => {
 });
 
 /**
+ * Mint a LiveKit access token so the browser can join a room as a
+ * participant. The Python agent (livekit_agent.py) joins the same room
+ * using its own server-side credentials. Phase 2a uses this just for the
+ * audio-quality probe; phase 2b will use it for the full voice agent.
+ *
+ * GET /api/livekit/token?room=audio-test&identity=user-1234
+ */
+app.get('/api/livekit/token', async (req, res) => {
+  try {
+    const apiKey = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
+    const url = process.env.LIVEKIT_URL;
+    if (!apiKey || !apiSecret || !url) {
+      return res.status(503).json({
+        error: 'livekit_not_configured',
+        message: 'Set LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET in .env',
+      });
+    }
+
+    const room = String(req.query.room || 'audio-test');
+    const identity = String(req.query.identity || `user-${Math.random().toString(36).slice(2, 10)}`);
+
+    const at = new AccessToken(apiKey, apiSecret, { identity, ttl: '10m' });
+    at.addGrant({
+      roomJoin: true,
+      room,
+      canPublish: true,
+      canSubscribe: true,
+    });
+
+    res.json({
+      url,
+      token: await at.toJwt(),
+      identity,
+      room,
+    });
+  } catch (error) {
+    console.error('livekit token error:', error);
+    res.status(500).json({ error: 'token_failed', message: error.message });
+  }
+});
+
+/**
  * List Available Agents
  * GET /api/agents
  *
@@ -220,15 +264,14 @@ app.post('/api/scenario/start', async (req, res) => {
       language: scenario.defaultLanguage || 'de',
       scenarioId: scenario.id,
     });
-    if (voiceId !== undefined) {
-      voicePipeline.voiceConfig.voiceId = Number(voiceId);
-    }
-
+    // Per-request voiceId only — if undefined (UI sent SDK-Default) the
+    // SDK falls back to its built-in default voice, which is what the
+    // colleague's reference script tests with.
     const greeting = scenario.greeting;
-    const tts = await kugelAudioClient.textToSpeech(
-      greeting,
-      voicePipeline.ttsOptions(scenario.defaultLanguage || 'de'),
-    );
+    const tts = await kugelAudioClient.textToSpeech(greeting, {
+      ...voicePipeline.ttsOptions(scenario.defaultLanguage || 'de'),
+      voiceId: voiceId !== undefined ? Number(voiceId) : undefined,
+    });
     const wav = pcmToWav(tts.audio, tts.sampleRate);
 
     // Seed the conversation history so the LLM sees its own opening turn.
@@ -274,11 +317,12 @@ app.post('/api/converse', async (req, res) => {
     if (!voicePipeline.activeSessions.has(sessionId)) {
       voicePipeline.createSession(sessionId, { language: effectiveLanguage, scenarioId: scenario.id });
     }
-    if (voiceId !== undefined) {
-      voicePipeline.voiceConfig.voiceId = Number(voiceId);
-    }
 
-    const result = await voicePipeline.processText(text, sessionId, { language, scenarioId: scenario.id });
+    const result = await voicePipeline.processText(text, sessionId, {
+      language,
+      scenarioId: scenario.id,
+      voiceId: voiceId !== undefined ? Number(voiceId) : undefined,
+    });
     const wav = pcmToWav(result.audio, result.sampleRate);
 
     res.json({
@@ -337,9 +381,6 @@ app.post('/api/converse/stream', async (req, res) => {
     const sessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     if (!voicePipeline.activeSessions.has(sessionId)) {
       voicePipeline.createSession(sessionId, { language: effectiveLanguage, scenarioId: scenario.id });
-    }
-    if (voiceId !== undefined) {
-      voicePipeline.voiceConfig.voiceId = Number(voiceId);
     }
     const session = voicePipeline.getSession(sessionId);
     // Allow the client to switch scenarios mid-session without creating a new session.
@@ -401,7 +442,10 @@ app.post('/api/converse/stream', async (req, res) => {
     const ttsStartedAt = Date.now();
     try {
       await kugelAudioClient.streamFullTextTts(spokenText, {
-        voiceId: ttsOpts.voiceId,
+        // Per-request voiceId: undefined → SDK default voice (matches the
+        // reference benchmark script). Whatever the UI didn't send, we
+        // don't synthesise.
+        voiceId: voiceId !== undefined ? Number(voiceId) : undefined,
         language: ttsOpts.language,
         cfgScale: ttsOpts.cfgScale,
         normalize: ttsOpts.normalize,
@@ -672,8 +716,57 @@ async function startTtsSidecar() {
   return child;
 }
 
+// Spawn the LiveKit voice agent (Phase 2). Different from the TTS sidecar:
+// the agent is a long-running worker that connects out to LiveKit Cloud,
+// not a local HTTP server. Idempotency is just "did we already spawn one
+// in this process".
+let livekitAgentChild = null;
+let shuttingDown = false;
+process.once('SIGINT', () => { shuttingDown = true; });
+process.once('SIGTERM', () => { shuttingDown = true; });
+function startLivekitAgent() {
+  if (livekitAgentChild && livekitAgentChild.exitCode === null) {
+    console.log('[livekit agent] already running');
+    return livekitAgentChild;
+  }
+  if (!process.env.LIVEKIT_URL || !process.env.LIVEKIT_API_KEY || !process.env.LIVEKIT_API_SECRET) {
+    console.warn('[livekit agent] LIVEKIT_* env vars not set — skipping auto-start');
+    return null;
+  }
+  const venvPython = path.resolve('.venv-tts/bin/python');
+  if (!existsSync(venvPython) || !existsSync('livekit_agent.py')) {
+    console.warn('[livekit agent] venv or livekit_agent.py missing — skipping');
+    return null;
+  }
+
+  console.log('[livekit agent] launching worker');
+  const child = spawn(venvPython, ['livekit_agent.py', 'dev'], {
+    env: { ...process.env, PYTHONUNBUFFERED: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  livekitAgentChild = child;
+  const tag = (line) => `[livekit agent] ${line}`;
+  child.stdout.on('data', (b) => b.toString().split(/\r?\n/).filter(Boolean).forEach((l) => console.log(tag(l))));
+  child.stderr.on('data', (b) => b.toString().split(/\r?\n/).filter(Boolean).forEach((l) => console.warn(tag(l))));
+  child.on('exit', (code, signal) => {
+    console.warn(`[livekit agent] exited (code ${code}, signal ${signal})`);
+    if (livekitAgentChild === child) livekitAgentChild = null;
+    // Auto-respawn unless we're shutting down — agent dying mid-session
+    // shouldn't require a full Node restart to recover.
+    if (!shuttingDown) {
+      setTimeout(() => startLivekitAgent(), 1500);
+    }
+  });
+  const stop = () => { try { child.kill('SIGTERM'); } catch {} };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  process.once('exit', stop);
+  return child;
+}
+
 httpServer.listen(PORT, () => {
   startTtsSidecar();
+  startLivekitAgent();
 
   // Poll briefly so the boot log makes it obvious whether TTS is ready.
   (async () => {
