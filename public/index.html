@@ -1019,9 +1019,6 @@
   async function startScenarioConversation() {
     const s = currentScenario();
     if (!s) return;
-    if (openingPrefetchPromise && openingPrefetchScenarioId === s.id) {
-      try { await openingPrefetchPromise; } catch {}
-    }
     const ready = await ensureLiveReady();
     if (!ready) return;
 
@@ -1162,6 +1159,7 @@
           sessionId = null;
           renderScenarios();
           renderSuggestions();
+          prefetchScenarioOpening(id);
         }
         await startScenarioConversation();
       });
@@ -1374,6 +1372,27 @@
   const liveFallbackSend = $('liveFallbackSend');
   let audioStartWatchdog = null;
   let speechWatchdog = null;
+  let micUnavailableReason = '';
+
+  function micAccessErrorMessage(error) {
+    const name = error?.name || '';
+    if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError') {
+      return 'Mikrofonzugriff verweigert, bitte Browser-Berechtigung pruefen und erneut versuchen.';
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+      return 'Kein Mikrofon gefunden.';
+    }
+    if (name === 'NotReadableError' || name === 'TrackStartError') {
+      return 'Mikrofon ist bereits in Benutzung, bitte andere Audio-Apps/Browser-Tabs schliessen.';
+    }
+    if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+      return 'Mikrofon-Konfiguration wird vom Browser nicht unterstuetzt.';
+    }
+    if (name === 'AbortError') {
+      return 'Mikrofon-Start wurde vom Browser abgebrochen, bitte erneut versuchen.';
+    }
+    return `Mikrofon konnte nicht gestartet werden (${name || 'unknown_error'}).`;
+  }
 
   // Decode base64 WAV → AudioBuffer and play through the shared AudioContext.
   // Resolves when playback ends. Using AudioContext (not <audio>) because
@@ -1574,29 +1593,35 @@
       return false;
     }
     try {
-      if (!micStream || !micStream.getTracks().some(t => t.readyState === 'live')) {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      }
-    } catch (e) {
-      showError('Mikrofonzugriff verweigert — Berechtigung erteilen und erneut versuchen.');
-      return false;
-    }
-    try {
       if (!audioCtx) {
         const Ctx = window.AudioContext || window.webkitAudioContext;
         audioCtx = new Ctx();
       }
       if (audioCtx.state === 'suspended') await audioCtx.resume();
-      if (!micAnalyser) {
+      if (!micStream || !micStream.getTracks().some(t => t.readyState === 'live')) {
+        try {
+          micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          micUnavailableReason = '';
+        } catch (e) {
+          micStream = null;
+          micUnavailableReason = micAccessErrorMessage(e);
+          console.warn('ensureLiveReady getUserMedia failed (non-blocking):', e?.name, e?.message);
+        }
+      }
+      if (micStream && !micAnalyser) {
         const source = audioCtx.createMediaStreamSource(micStream);
         micAnalyser = audioCtx.createAnalyser();
         micAnalyser.fftSize = 512;
         micAnalyser.smoothingTimeConstant = 0.6;
         source.connect(micAnalyser);
         startMicMeter();
+      } else if (!micStream) {
+        stopMicMeter();
       }
     } catch (e) {
       console.warn('AudioContext setup failed', e);
+      showError('Audio konnte nicht initialisiert werden, bitte Seite neu laden.');
+      return false;
     }
     return true;
   }
@@ -1691,6 +1716,15 @@
     await liveStartSse();
   }
 
+  function openLiveOverlayOnly() {
+    liveActive = true;
+    liveOverlay.classList.add('active');
+    hideLiveWarn();
+    setOrbState('idle');
+    liveTranscript.className = 'live-transcript empty';
+    liveTranscript.textContent = 'Bereit. Tippe unten oder starte Live-Modus.';
+  }
+
   function liveStop() {
     liveActive = false;
     clearLiveSilenceTimer();
@@ -1718,6 +1752,9 @@
     if (!liveActive) return;
     dbg('live listening start');
     setOrbState('listening');
+    if (micUnavailableReason) {
+      showLiveWarn(`${micUnavailableReason} Du kannst unten tippen.`);
+    }
     liveRecog = new SRctor();
     liveRecog.continuous = true;
     liveRecog.interimResults = true;
@@ -1954,7 +1991,7 @@
   }
 
   goLiveBtn?.addEventListener('click', liveStart);
-  heroStartBtn?.addEventListener('click', liveStart);
+  heroStartBtn?.addEventListener('click', startScenarioConversation);
   liveStopBtn?.addEventListener('click', liveStop);
 
   // ─── Phase 2a: LiveKit audio-quality probe ───────────────────
