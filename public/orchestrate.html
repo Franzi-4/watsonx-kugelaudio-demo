@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>IBM watsonx Orchestrate × Kugel Voice</title>
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --fg: #f4f4f4;
+      --muted: #8a8a8a;
+      --accent: #4589ff;
+      --ok: #42be65;
+      --warn: #f1c21b;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    header {
+      padding: 16px 24px;
+      border-bottom: 1px solid #1f1f1f;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    header h1 { margin: 0; font-size: 16px; font-weight: 500; }
+    header .sub { color: var(--muted); font-size: 13px; }
+    .voice-bar {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 13px;
+    }
+    .voice-bar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .voice-bar input[type="checkbox"] { accent-color: var(--accent); }
+    .status { color: var(--muted); font-size: 12px; min-width: 180px; }
+    .status.ok { color: var(--ok); }
+    .status.warn { color: var(--warn); }
+    .mic-btn {
+      background: var(--accent); color: white; border: none;
+      border-radius: 999px; padding: 8px 16px; font-size: 13px;
+      font-weight: 500; cursor: pointer; display: flex;
+      align-items: center; gap: 6px;
+    }
+    .mic-btn:hover { filter: brightness(1.1); }
+    .mic-btn.listening { background: #da1e28; animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .mic-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    main { height: calc(100vh - 57px); }
+    #root { height: 100%; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>IBM watsonx Orchestrate <span style="color:var(--muted);font-weight:400">× Kugel Voice Layer</span></h1>
+    <span class="sub">schaden_meldung_assistant</span>
+    <div class="voice-bar">
+      <button id="micBtn" class="mic-btn" type="button" title="Sprechen (Leertaste halten)">
+        <span>🎤</span><span>Sprechen</span>
+      </button>
+      <label><input id="voiceToggle" type="checkbox" checked /> Voice an</label>
+      <span id="voiceStatus" class="status">bereit</span>
+    </div>
+  </header>
+  <main>
+    <div id="root"></div>
+  </main>
+
+  <!-- ============================================================
+       1) Embed the IBM watsonx Orchestrate web chat widget
+       Configuration provided by the IBM Orchestrate UI:
+       Channels → Web chat → Embed snippet.
+       ============================================================ -->
+  <script>
+    window.wxOConfiguration = {
+      orchestrationID: "dd6efefe79f24d179ad0866fbd718600_4f0b6a24-5cc4-49e8-9b3a-7b4b692d0316",
+      hostURL: "https://eu-de.watson-orchestrate.cloud.ibm.com",
+      rootElementID: "root",
+      deploymentPlatform: "ibmcloud",
+      crn: "crn:v1:bluemix:public:watsonx-orchestrate:eu-de:a/dd6efefe79f24d179ad0866fbd718600:4f0b6a24-5cc4-49e8-9b3a-7b4b692d0316::",
+      chatOptions: {
+        agentId: "368c6c94-783b-4838-bcde-0ff465f27264",
+        agentEnvironmentId: "959a94fa-0cee-48e3-a48b-49e99f44832b",
+      },
+    };
+    setTimeout(function () {
+      const script = document.createElement("script");
+      script.src = `${window.wxOConfiguration.hostURL}/wxochat/wxoLoader.js?embed=true`;
+      script.addEventListener("load", function () { wxoLoader.init(); });
+      document.head.appendChild(script);
+    }, 0);
+  </script>
+
+  <!-- ============================================================
+       2) Kugel voice layer
+       Watches the widget DOM for new assistant messages, sends each
+       one to /api/tts, and plays the returned audio.
+       The widget renders messages inside the #root subtree. We pick
+       up nodes that look like assistant turns (text content, not
+       authored by the user) and de-dupe by seen-text-hash so we
+       never speak the same message twice.
+       ============================================================ -->
+  <script>
+    (() => {
+      const statusEl = document.getElementById("voiceStatus");
+      const toggleEl = document.getElementById("voiceToggle");
+      const root = document.getElementById("root");
+      const seen = new Set();
+      const queue = [];
+      let playing = false;
+      let audioEl = null;
+
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        statusEl.className = "status" + (cls ? " " + cls : "");
+      }
+
+      function hash(s) {
+        let h = 0;
+        for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+        return String(h);
+      }
+
+      // Heuristic: pull plain text out of an element, drop button labels
+      // and anything that looks like UI chrome.
+      function extractText(el) {
+        if (!el) return "";
+        // Skip the input area entirely.
+        if (el.closest("[role='textbox'], textarea, input, button")) return "";
+        return (el.innerText || el.textContent || "").trim();
+      }
+
+      // Identify whether a node is an assistant message (vs. user).
+      // IBM widget tends to mark message authorship via ARIA, classes
+      // like "ai-message"/"bot-message", or a "WatsonAssistantChatHost"
+      // shadow-root. We look for any of:
+      //   - aria-label containing "assistant" or "agent" or "bot"
+      //   - class containing "assistant" / "bot" / "agent"
+      //   - role="article" with non-user data attributes
+      function looksLikeAssistant(el) {
+        if (!el || el.nodeType !== 1) return false;
+        const lower = (s) => (s || "").toLowerCase();
+        const aria = lower(el.getAttribute && el.getAttribute("aria-label"));
+        const cls = lower(el.className && el.className.toString && el.className.toString());
+        const role = lower(el.getAttribute && el.getAttribute("role"));
+        if (aria.includes("user") || cls.includes("user-message") || cls.includes("from-user")) return false;
+        return (
+          aria.includes("assistant") || aria.includes("agent") || aria.includes("bot") ||
+          cls.includes("assistant") || cls.includes("bot-message") || cls.includes("ai-message") ||
+          (role === "article" && !cls.includes("user"))
+        );
+      }
+
+      async function speak(text) {
+        if (!toggleEl.checked) return;
+        if (!text || text.length < 2) return;
+        const id = hash(text);
+        if (seen.has(id)) return;
+        seen.add(id);
+        queue.push(text);
+        drain();
+      }
+
+      async function drain() {
+        if (playing || queue.length === 0) return;
+        playing = true;
+        const text = queue.shift();
+        setStatus("synthetisiere…");
+        try {
+          const r = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          const blob = await r.blob();
+          const url = URL.createObjectURL(blob);
+          if (audioEl) { try { audioEl.pause(); } catch {} }
+          audioEl = new Audio(url);
+          setStatus("spricht…", "ok");
+          audioEl.addEventListener("ended", () => {
+            URL.revokeObjectURL(url);
+            playing = false;
+            setStatus("bereit");
+            drain();
+          });
+          audioEl.addEventListener("error", () => {
+            URL.revokeObjectURL(url);
+            playing = false;
+            setStatus("audio-fehler", "warn");
+            drain();
+          });
+          await audioEl.play().catch(() => {
+            // Autoplay was blocked — wait for a click anywhere to retry.
+            setStatus("klick zum hören", "warn");
+            const retry = () => {
+              document.removeEventListener("click", retry);
+              audioEl.play().catch(() => {});
+            };
+            document.addEventListener("click", retry, { once: true });
+          });
+        } catch (e) {
+          console.warn("[voice]", e);
+          setStatus("TTS fehler: " + e.message, "warn");
+          playing = false;
+          drain();
+        }
+      }
+
+      // Walk the widget every time something new appears, looking for
+      // assistant message bubbles we haven't spoken yet. We treat the
+      // CURRENT text of the bubble as the source of truth — when the
+      // widget streams tokens, the same node grows over time, so we
+      // wait until it stops growing for ~600ms before we speak it.
+      const debounceMap = new WeakMap();
+      function consider(el) {
+        if (!looksLikeAssistant(el)) return;
+        const t = extractText(el);
+        if (!t) return;
+        clearTimeout(debounceMap.get(el));
+        const tm = setTimeout(() => speak(extractText(el)), 600);
+        debounceMap.set(el, tm);
+      }
+
+      const observer = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          for (const node of m.addedNodes) {
+            if (node.nodeType !== 1) continue;
+            consider(node);
+            node.querySelectorAll && node.querySelectorAll("*").forEach(consider);
+          }
+          if (m.type === "characterData" && m.target.parentElement) {
+            consider(m.target.parentElement.closest("[class],[role],[aria-label]") || m.target.parentElement);
+          }
+        }
+      });
+
+      // Start watching once the widget mounts. Some versions render into
+      // a shadow root; we watch the host as well.
+      function attach() {
+        observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+        setStatus("bereit");
+      }
+      if (document.readyState === "complete" || document.readyState === "interactive") attach();
+      else document.addEventListener("DOMContentLoaded", attach);
+    })();
+  </script>
+
+  <!-- ============================================================
+       3) Voice input — push-to-talk via Web Speech API
+       Click the mic button (or hold spacebar) → browser STT (de-DE)
+       → injected into the IBM widget input field → submit.
+       Uses webkitSpeechRecognition which is built into Chrome/Edge.
+       ============================================================ -->
+  <script>
+    (() => {
+      const micBtn = document.getElementById("micBtn");
+      const statusEl = document.getElementById("voiceStatus");
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+      if (!SR) {
+        micBtn.disabled = true;
+        micBtn.title = "Spracherkennung wird in diesem Browser nicht unterstützt — Chrome oder Edge benutzen.";
+        return;
+      }
+
+      let recognition = null;
+      let listening = false;
+
+      // Find the IBM widget's text input. The widget renders into #root,
+      // sometimes through a shadow DOM. We try a few selectors and fall
+      // back to "any visible textarea or [contenteditable] inside #root".
+      function findInput() {
+        const root = document.getElementById("root");
+        if (!root) return null;
+        const candidates = [
+          'textarea',
+          'input[type="text"]',
+          '[contenteditable="true"]',
+          '[role="textbox"]',
+        ];
+        for (const sel of candidates) {
+          const el = root.querySelector(sel);
+          if (el && el.offsetParent !== null) return el;
+        }
+        // Walk shadow roots if present
+        function walk(node) {
+          if (node.shadowRoot) {
+            for (const sel of candidates) {
+              const el = node.shadowRoot.querySelector(sel);
+              if (el && el.offsetParent !== null) return el;
+            }
+            for (const c of node.shadowRoot.querySelectorAll("*")) {
+              const found = walk(c);
+              if (found) return found;
+            }
+          }
+          return null;
+        }
+        return walk(root);
+      }
+
+      function findSendButton(input) {
+        if (!input) return null;
+        // Look for a sibling/ancestor button that looks like Send.
+        const scope = input.closest("form") || input.parentElement?.parentElement || document.getElementById("root");
+        if (!scope) return null;
+        const btns = scope.querySelectorAll('button, [role="button"]');
+        for (const b of btns) {
+          const lbl = ((b.getAttribute("aria-label") || "") + " " + (b.title || "") + " " + (b.textContent || "")).toLowerCase();
+          if (/send|abschicken|senden|submit/.test(lbl)) return b;
+        }
+        return btns[btns.length - 1] || null;
+      }
+
+      function injectAndSubmit(text) {
+        const input = findInput();
+        if (!input) {
+          statusEl.textContent = "Widget-Input nicht gefunden";
+          statusEl.className = "status warn";
+          return;
+        }
+        // Set value in a way that React/Carbon picks up
+        const isContentEditable = input.getAttribute("contenteditable") === "true";
+        if (isContentEditable) {
+          input.focus();
+          input.textContent = text;
+          input.dispatchEvent(new InputEvent("input", { bubbles: true, data: text }));
+        } else {
+          const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set
+            || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+          input.focus();
+          if (nativeSetter) nativeSetter.call(input, text);
+          else input.value = text;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        // Submit: Enter key first, then fall back to clicking the send button
+        setTimeout(() => {
+          input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+          input.dispatchEvent(new KeyboardEvent("keypress", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+          input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
+          // Belt-and-braces: click send button after a brief delay
+          setTimeout(() => {
+            const stillThere = findInput();
+            const stillHasText = stillThere && (stillThere.value === text || stillThere.textContent === text);
+            if (stillHasText) {
+              const send = findSendButton(stillThere);
+              if (send) send.click();
+            }
+          }, 150);
+        }, 50);
+      }
+
+      function startListening() {
+        if (listening) return;
+        recognition = new SR();
+        recognition.lang = "de-DE";
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+
+        recognition.onstart = () => {
+          listening = true;
+          micBtn.classList.add("listening");
+          micBtn.querySelector("span:last-child").textContent = "Höre zu…";
+          statusEl.textContent = "höre zu…";
+          statusEl.className = "status ok";
+        };
+        recognition.onerror = (e) => {
+          statusEl.textContent = "Mic-Fehler: " + e.error;
+          statusEl.className = "status warn";
+        };
+        recognition.onend = () => {
+          listening = false;
+          micBtn.classList.remove("listening");
+          micBtn.querySelector("span:last-child").textContent = "Sprechen";
+        };
+        recognition.onresult = (e) => {
+          const text = e.results[0][0].transcript.trim();
+          if (text) {
+            statusEl.textContent = `gesendet: "${text}"`;
+            statusEl.className = "status";
+            injectAndSubmit(text);
+          }
+        };
+        recognition.start();
+      }
+
+      function stopListening() {
+        if (recognition && listening) recognition.stop();
+      }
+
+      micBtn.addEventListener("click", () => listening ? stopListening() : startListening());
+
+      // Push-to-talk via spacebar (when not typing in the widget input)
+      let spaceDown = false;
+      document.addEventListener("keydown", (e) => {
+        if (e.code !== "Space") return;
+        const t = e.target;
+        const isInput = t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.getAttribute("contenteditable") === "true");
+        if (isInput) return;
+        if (spaceDown) return;
+        spaceDown = true;
+        e.preventDefault();
+        startListening();
+      });
+      document.addEventListener("keyup", (e) => {
+        if (e.code !== "Space") return;
+        if (!spaceDown) return;
+        spaceDown = false;
+        stopListening();
+      });
+    })();
+  </script>
+</body>
+</html>

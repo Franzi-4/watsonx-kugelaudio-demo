@@ -988,7 +988,6 @@
 
   const SHORT_LABELS = {
     claims: 'Schadensmeldung',
-    hotline: 'Bürgerhotline',
   };
 
   function renderScenarios() {}
@@ -1132,7 +1131,7 @@
 
     empty.innerHTML = `
       <h2>Voice Agent · IBM × Kugel Audio Demo</h2>
-      <div class="lede">Zwei deutsche Voice-Agents, beide mit watsonx.ai Llama 3.3 70B und Kugel-Audio-Readback. Wähle ein Szenario — der Agent meldet sich zuerst.</div>
+      <div class="lede">Deutscher Voice-Agent für die Schadensaufnahme — watsonx.ai Llama 3.3 70B mit Kugel-Audio-Readback. Klick auf „Gespräch starten" — der Agent meldet sich zuerst.</div>
       <div class="scenario-choice">${cardsHtml}</div>
       <div class="hint">oder unten tippen · <kbd>⌘</kbd> <kbd>↵</kbd> antworten · <kbd>Esc</kbd> Live beenden</div>`;
     thread.appendChild(empty);
