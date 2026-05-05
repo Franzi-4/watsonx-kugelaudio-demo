@@ -29,6 +29,7 @@ class VoicePipeline {
   constructor(config) {
     this.kugelAudioClient = config.kugelAudioClient;
     this.watsonxClient = config.watsonxClient;
+    this.orchestrateClient = config.orchestrateClient || null;
     this.defaultAgentId = config.defaultAgentId;
     // Only carry values that the caller actually set. cfgScale / normalize /
     // sampleRate left undefined → not forwarded → SDK falls through to its
@@ -120,12 +121,24 @@ class VoicePipeline {
 
     let responseText;
     let usage;
-    try {
-      const reply = await this.watsonxClient.chat(messages, { maxTokens: 250, temperature: 0.7 });
-      responseText = reply.text?.trim();
-      usage = reply.usage;
-    } catch (error) {
-      console.warn(`[${sessionId}] watsonx chat failed: ${error.message} — falling back to local agent`);
+    if (this.orchestrateClient) {
+      try {
+        const reply = await this.orchestrateClient.chat(messages, {
+          context: { sessionId, scenarioId: session.scenarioId },
+        });
+        responseText = reply.text?.trim();
+      } catch (error) {
+        console.warn(`[${sessionId}] orchestrate chat failed: ${error.message} — falling back to watsonx.ai`);
+      }
+    }
+    if (!responseText) {
+      try {
+        const reply = await this.watsonxClient.chat(messages, { maxTokens: 250, temperature: 0.7 });
+        responseText = reply.text?.trim();
+        usage = reply.usage;
+      } catch (error) {
+        console.warn(`[${sessionId}] watsonx chat failed: ${error.message} — falling back to local agent`);
+      }
     }
     if (!responseText) {
       responseText = await generateResponse(intentResult.intent, session.context, userText);

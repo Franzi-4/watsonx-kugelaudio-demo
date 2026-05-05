@@ -62,7 +62,7 @@ class OrchestrateClient {
     const token = await this._ensureToken();
 
     const { data } = await this.client.post(
-      `/api/v1/orchestrate/${targetAgent}/chat/completions`,
+      `/v1/orchestrate/${targetAgent}/chat/completions`,
       { messages, stream, context },
       {
         headers: {

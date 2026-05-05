@@ -8,6 +8,7 @@ import path from 'path';
 import { AccessToken } from 'livekit-server-sdk';
 import KugelAudioClient from './kugelaudio-client.js';
 import WatsonxClient from './watsonx-client.js';
+import OrchestrateClient from './orchestrate-client.js';
 import VoicePipeline from './voice-pipeline.js';
 import { listScenarios, getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
 import { cleanLlmText } from './agents/text-cleanup.js';
@@ -60,6 +61,24 @@ const watsonxClient = new WatsonxClient({
   projectId: process.env.WATSONX_PROJECT_ID,
 });
 
+// Optional: route chat through watsonx Orchestrate when fully configured.
+// Falls back to direct watsonx.ai chat when any of the three vars are missing.
+const orchestrateConfigured = !!(
+  process.env.ORCHESTRATE_API_KEY &&
+  process.env.ORCHESTRATE_INSTANCE_URL &&
+  process.env.ORCHESTRATE_AGENT_ID
+);
+const orchestrateClient = orchestrateConfigured
+  ? new OrchestrateClient({
+      apiKey: process.env.ORCHESTRATE_API_KEY,
+      instanceUrl: process.env.ORCHESTRATE_INSTANCE_URL,
+      agentId: process.env.ORCHESTRATE_AGENT_ID,
+    })
+  : null;
+if (orchestrateClient) {
+  console.log(`[orchestrate] routing chat through agent ${process.env.ORCHESTRATE_AGENT_ID}`);
+}
+
 // Per-scenario fine-tuned deployment ids (optional). If set, streaming
 // requests for that scenario route to /ml/v1/deployments/{id}/text/chat_stream
 // instead of the foundation-model endpoint.
@@ -75,6 +94,7 @@ for (const [id, dep] of Object.entries(SCENARIO_DEPLOYMENTS)) {
 const voicePipeline = new VoicePipeline({
   kugelAudioClient,
   watsonxClient,
+  orchestrateClient,
   defaultAgentId: process.env.DEFAULT_AGENT_ID || 'customer-service-agent',
   voiceConfig: {
     voiceId: process.env.KUGELAUDIO_VOICE_ID || 'default',
@@ -107,6 +127,7 @@ app.get('/api/health', async (req, res) => {
   try {
     const kugelAudioHealth = await kugelAudioClient.healthCheck();
     const watsonxHealth = await watsonxClient.healthCheck();
+    const orchestrateHealth = orchestrateClient ? await orchestrateClient.healthCheck() : false;
 
     const status = kugelAudioHealth && watsonxHealth ? 'healthy' : 'degraded';
     const statusCode = status === 'healthy' ? 200 : 503;
@@ -117,13 +138,16 @@ app.get('/api/health', async (req, res) => {
       services: {
         kugelaudio: kugelAudioHealth ? 'up' : 'down',
         watsonx_ai: watsonxHealth ? 'up' : 'down',
-        watsonx_orchestrate: process.env.ORCHESTRATE_URL ? 'provisioned' : 'missing',
+        watsonx_orchestrate: orchestrateClient
+          ? (orchestrateHealth ? 'up' : 'down')
+          : (process.env.ORCHESTRATE_URL ? 'provisioned' : 'missing'),
         watsonx_governance: process.env.GOVERNANCE_GUID ? 'provisioned' : 'missing',
       },
       orchestrate: process.env.ORCHESTRATE_URL ? {
         launch_url: process.env.ORCHESTRATE_URL + '/chat',
-        agent: process.env.ORCHESTRATE_AGENT || 'AskOrchestrate',
-      } : null,
+        agent: process.env.ORCHESTRATE_AGENT || process.env.ORCHESTRATE_AGENT_ID || 'AskOrchestrate',
+        active: !!orchestrateClient,
+      } : (orchestrateClient ? { agent: process.env.ORCHESTRATE_AGENT_ID, active: true } : null),
       model: 'meta-llama/llama-3-3-70b-instruct',
     });
   } catch (error) {
@@ -418,6 +442,30 @@ app.post('/api/converse/stream', async (req, res) => {
       fullText = text;
       llmMs = 0;
       send('delta', { text });
+    } else if (orchestrateClient) {
+      // Orchestrate path: non-streaming agent call. Emit the full response as
+      // a single delta so the existing client SSE handler still works.
+      const llmStartedAt = Date.now();
+      try {
+        const reply = await orchestrateClient.chat(messages, {
+          context: { sessionId, scenarioId: session.scenarioId },
+        });
+        fullText = (reply.text || '').trim();
+        if (fullText) send('delta', { text: fullText });
+      } catch (e) {
+        console.warn(`Orchestrate chat failed: ${e.message} — falling back to watsonx.ai`);
+      }
+      if (!fullText) {
+        const deploymentId = SCENARIO_DEPLOYMENTS[session.scenarioId] || undefined;
+        const result = await watsonxClient.chatStream(messages, {
+          deploymentId,
+          maxTokens: 180,
+          temperature: 0.7,
+          onDelta: (d) => send('delta', { text: d }),
+        });
+        fullText = result.fullText;
+      }
+      llmMs = Date.now() - llmStartedAt;
     } else {
       const deploymentId = SCENARIO_DEPLOYMENTS[session.scenarioId] || undefined;
       const llmStartedAt = Date.now();
