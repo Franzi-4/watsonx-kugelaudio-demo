@@ -1,16 +1,17 @@
 import dotenv from 'dotenv';
 import express from 'express';
 import { WebSocketServer } from 'ws';
-import { createServer } from 'http';
+import { createServer as createHttpServer } from 'http';
+import { createServer as createHttpsServer } from 'https';
 import { spawn } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { AccessToken } from 'livekit-server-sdk';
 import KugelAudioClient from './kugelaudio-client.js';
 import WatsonxClient from './watsonx-client.js';
 import OrchestrateClient from './orchestrate-client.js';
 import VoicePipeline from './voice-pipeline.js';
-import { listScenarios, getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
+import { listScenarios, getScenario, getScriptedAssistantTurn, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
 import { cleanLlmText } from './agents/text-cleanup.js';
 
 // Wrap raw PCM16 LE bytes in a minimal WAV container so browsers can <audio src>.
@@ -41,12 +42,137 @@ function clipLogValue(value, maxLen = 220) {
   return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseBoolEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  return raw.toLowerCase() === 'true';
+}
+
+function parsePositiveIntEnv(name, fallback) {
+  const value = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function parseProbabilityEnv(name, fallback) {
+  const value = Number.parseFloat(process.env[name] || '');
+  if (!Number.isFinite(value)) return fallback;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
+function randomIntBetween(min, max) {
+  const low = Math.min(min, max);
+  const high = Math.max(min, max);
+  return Math.floor(Math.random() * (high - low + 1)) + low;
+}
+
 // Load environment variables
 dotenv.config();
 
+const FAKE_LLM_LATENCY_ENABLED = parseBoolEnv('FAKE_LLM_LATENCY_ENABLED', true);
+const FAKE_LLM_LATENCY_MIN_MS = parsePositiveIntEnv('FAKE_LLM_LATENCY_MIN_MS', 120);
+const FAKE_LLM_LATENCY_MAX_MS = parsePositiveIntEnv('FAKE_LLM_LATENCY_MAX_MS', 480);
+const FAKE_AGENT_DELAY_ENABLED = parseBoolEnv('FAKE_AGENT_DELAY_ENABLED', true);
+const FAKE_AGENT_DELAY_CHANCE = Number.parseFloat(process.env.FAKE_AGENT_DELAY_CHANCE || '0.35');
+const FAKE_AGENT_DELAY_MIN_MS = parsePositiveIntEnv('FAKE_AGENT_DELAY_MIN_MS', 70);
+const FAKE_AGENT_DELAY_MAX_MS = parsePositiveIntEnv('FAKE_AGENT_DELAY_MAX_MS', 240);
+const PRE_SPEECH_DELAY_FIXED_MS = (process.env.PRE_SPEECH_DELAY_MS !== undefined)
+  ? parsePositiveIntEnv('PRE_SPEECH_DELAY_MS', 180)
+  : null;
+const PRE_SPEECH_DELAY_MIN_MS = parsePositiveIntEnv('PRE_SPEECH_DELAY_MIN_MS', 120);
+const PRE_SPEECH_DELAY_MAX_MS = parsePositiveIntEnv('PRE_SPEECH_DELAY_MAX_MS', 260);
+const PRE_SPEECH_DELAY_LONG_PAUSE_CHANCE = parseProbabilityEnv('PRE_SPEECH_DELAY_LONG_PAUSE_CHANCE', 0.22);
+const PRE_SPEECH_DELAY_LONG_PAUSE_MIN_MS = parsePositiveIntEnv('PRE_SPEECH_DELAY_LONG_PAUSE_MIN_MS', 80);
+const PRE_SPEECH_DELAY_LONG_PAUSE_MAX_MS = parsePositiveIntEnv('PRE_SPEECH_DELAY_LONG_PAUSE_MAX_MS', 220);
+const PSEUDO_DELTA_STREAM_ENABLED = parseBoolEnv('PSEUDO_DELTA_STREAM_ENABLED', true);
+const PSEUDO_DELTA_MIN_WORDS = parsePositiveIntEnv('PSEUDO_DELTA_MIN_WORDS', 1);
+const PSEUDO_DELTA_MAX_WORDS = parsePositiveIntEnv('PSEUDO_DELTA_MAX_WORDS', 4);
+const PSEUDO_DELTA_DELAY_MIN_MS = parsePositiveIntEnv('PSEUDO_DELTA_DELAY_MIN_MS', 18);
+const PSEUDO_DELTA_DELAY_MAX_MS = parsePositiveIntEnv('PSEUDO_DELTA_DELAY_MAX_MS', 70);
+const PSEUDO_DELTA_LONG_PAUSE_CHANCE = parseProbabilityEnv('PSEUDO_DELTA_LONG_PAUSE_CHANCE', 0.18);
+const PSEUDO_DELTA_LONG_PAUSE_MIN_MS = parsePositiveIntEnv('PSEUDO_DELTA_LONG_PAUSE_MIN_MS', 90);
+const PSEUDO_DELTA_LONG_PAUSE_MAX_MS = parsePositiveIntEnv('PSEUDO_DELTA_LONG_PAUSE_MAX_MS', 180);
+const PSEUDO_DELTA_PUNCT_PAUSE_MIN_MS = parsePositiveIntEnv('PSEUDO_DELTA_PUNCT_PAUSE_MIN_MS', 30);
+const PSEUDO_DELTA_PUNCT_PAUSE_MAX_MS = parsePositiveIntEnv('PSEUDO_DELTA_PUNCT_PAUSE_MAX_MS', 110);
+
+async function emitPseudoDeltaStream(text, emitDelta) {
+  const normalized = (text || '').trim();
+  if (!normalized) return;
+
+  if (!PSEUDO_DELTA_STREAM_ENABLED) {
+    emitDelta(normalized);
+    return;
+  }
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (!words.length) return;
+
+  const minWords = Math.max(1, PSEUDO_DELTA_MIN_WORDS);
+  const maxWords = Math.max(minWords, PSEUDO_DELTA_MAX_WORDS);
+  let cursor = 0;
+  while (cursor < words.length) {
+    const count = randomIntBetween(minWords, maxWords);
+    const end = Math.min(words.length, cursor + count);
+    let chunk = words.slice(cursor, end).join(' ');
+    if (end < words.length) chunk += ' ';
+    emitDelta(chunk);
+    cursor = end;
+    if (cursor >= words.length) break;
+
+    let pauseMs = randomIntBetween(PSEUDO_DELTA_DELAY_MIN_MS, PSEUDO_DELTA_DELAY_MAX_MS);
+    if (/[.,!?;:]$/.test(chunk.trim())) {
+      pauseMs += randomIntBetween(PSEUDO_DELTA_PUNCT_PAUSE_MIN_MS, PSEUDO_DELTA_PUNCT_PAUSE_MAX_MS);
+    }
+    if (Math.random() < PSEUDO_DELTA_LONG_PAUSE_CHANCE) {
+      pauseMs += randomIntBetween(PSEUDO_DELTA_LONG_PAUSE_MIN_MS, PSEUDO_DELTA_LONG_PAUSE_MAX_MS);
+    }
+    await sleep(pauseMs);
+  }
+}
+
+function samplePreSpeechDelayMs() {
+  const baseDelayMs = (PRE_SPEECH_DELAY_FIXED_MS !== null)
+    ? PRE_SPEECH_DELAY_FIXED_MS
+    : randomIntBetween(PRE_SPEECH_DELAY_MIN_MS, PRE_SPEECH_DELAY_MAX_MS);
+  let totalDelayMs = baseDelayMs;
+  if (Math.random() < PRE_SPEECH_DELAY_LONG_PAUSE_CHANCE) {
+    totalDelayMs += randomIntBetween(PRE_SPEECH_DELAY_LONG_PAUSE_MIN_MS, PRE_SPEECH_DELAY_LONG_PAUSE_MAX_MS);
+  }
+  return Math.max(0, totalDelayMs);
+}
+
 // Initialize Express app
 const app = express();
-const httpServer = createServer(app);
+let serverProtocol = 'http';
+function createAppServer() {
+  const wantsLocalHttps = process.env.LOCAL_HTTPS === 'true';
+  if (!wantsLocalHttps) return createHttpServer(app);
+
+  const certPath = process.env.LOCAL_HTTPS_CERT_PATH || path.resolve('.cert/localhost-cert.pem');
+  const keyPath = process.env.LOCAL_HTTPS_KEY_PATH || path.resolve('.cert/localhost-key.pem');
+  if (!existsSync(certPath) || !existsSync(keyPath)) {
+    console.warn(`[https] LOCAL_HTTPS=true but cert/key missing. Expected: cert=${certPath}, key=${keyPath}`);
+    console.warn('[https] Falling back to http. Generate certs or use npm run dev:https after creating them.');
+    return createHttpServer(app);
+  }
+
+  try {
+    const cert = readFileSync(certPath);
+    const key = readFileSync(keyPath);
+    serverProtocol = 'https';
+    console.log(`[https] enabled with cert=${certPath}`);
+    return createHttpsServer({ key, cert }, app);
+  } catch (error) {
+    console.warn(`[https] failed to read cert/key: ${error.message}. Falling back to http.`);
+    return createHttpServer(app);
+  }
+}
+const httpServer = createAppServer();
 
 // Middleware
 app.use(express.json());
@@ -364,13 +490,17 @@ const greetingCache = new Map();
 const openingPrefetchCache = new Map();
 const OPENING_PREFETCH_TTL_MS = 2 * 60 * 1000;
 
-function openingPrefetchKey(scenarioId, voiceId) {
-  const v = (voiceId === undefined || voiceId === null) ? 'default' : String(Number(voiceId));
-  return `${scenarioId}::${v}`;
+function normalizeConversationMode(mode) {
+  return mode === 'script' ? 'script' : 'free';
 }
 
-function getFreshOpeningPrefetch(scenarioId, voiceId) {
-  const key = openingPrefetchKey(scenarioId, voiceId);
+function openingPrefetchKey(scenarioId, voiceId, conversationMode = 'free') {
+  const v = (voiceId === undefined || voiceId === null) ? 'default' : String(Number(voiceId));
+  return `${scenarioId}::${v}::${normalizeConversationMode(conversationMode)}`;
+}
+
+function getFreshOpeningPrefetch(scenarioId, voiceId, conversationMode = 'free') {
+  const key = openingPrefetchKey(scenarioId, voiceId, conversationMode);
   const hit = openingPrefetchCache.get(key);
   if (!hit) return null;
   if (Date.now() > hit.expiresAt) {
@@ -380,15 +510,23 @@ function getFreshOpeningPrefetch(scenarioId, voiceId) {
   return hit;
 }
 
-function consumeOpeningPrefetch(scenarioId, voiceId) {
-  const key = openingPrefetchKey(scenarioId, voiceId);
-  const hit = getFreshOpeningPrefetch(scenarioId, voiceId);
+function consumeOpeningPrefetch(scenarioId, voiceId, conversationMode = 'free') {
+  const key = openingPrefetchKey(scenarioId, voiceId, conversationMode);
+  const hit = getFreshOpeningPrefetch(scenarioId, voiceId, conversationMode);
   if (!hit) return null;
   openingPrefetchCache.delete(key);
   return hit;
 }
 
-async function buildScenarioOpening(scenario, { sessionId } = {}) {
+async function buildScenarioOpening(scenario, { sessionId, conversationMode = 'free' } = {}) {
+  if (
+    normalizeConversationMode(conversationMode) === 'script' &&
+    Array.isArray(scenario.scriptedAssistantTurns) &&
+    scenario.scriptedAssistantTurns.length
+  ) {
+    return scenario.scriptedAssistantTurns[0];
+  }
+
   const openerMessages = [
     { role: 'system', content: scenario.systemPrompt },
     {
@@ -425,14 +563,16 @@ async function buildScenarioOpening(scenario, { sessionId } = {}) {
   return cleanLlmText(openingText, { language: scenario.defaultLanguage || 'de' }) || scenario.greeting;
 }
 
-async function prefetchScenarioOpening(scenarioId, voiceId) {
+async function prefetchScenarioOpening(scenarioId, voiceId, conversationMode = 'free') {
   const scenario = getScenario(scenarioId);
-  const existing = getFreshOpeningPrefetch(scenario.id, voiceId);
+  const mode = normalizeConversationMode(conversationMode);
+  const existing = getFreshOpeningPrefetch(scenario.id, voiceId, mode);
   if (existing) return { ...existing, cacheHit: true };
 
   const language = scenario.defaultLanguage || 'de';
   const openingText = await buildScenarioOpening(scenario, {
     sessionId: `prefetch_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+    conversationMode: mode,
   });
   const ttsOpts = voicePipeline.ttsOptions(language);
   const chunks = [];
@@ -463,7 +603,7 @@ async function prefetchScenarioOpening(scenarioId, voiceId) {
     expiresAt: Date.now() + OPENING_PREFETCH_TTL_MS,
     cacheHit: false,
   };
-  openingPrefetchCache.set(openingPrefetchKey(scenario.id, voiceId), record);
+  openingPrefetchCache.set(openingPrefetchKey(scenario.id, voiceId, mode), record);
   return record;
 }
 
@@ -527,7 +667,8 @@ async function ensureTtsSidecarReady(timeoutMs = 12000) {
  */
 app.post('/api/scenario/start/stream', async (req, res) => {
   const t0 = Date.now();
-  const { scenarioId, voiceId, sessionId: providedSessionId } = req.body || {};
+  const { scenarioId, voiceId, sessionId: providedSessionId, mode } = req.body || {};
+  const conversationMode = normalizeConversationMode(mode);
   const effectiveVoiceId = resolveVoiceId(voiceId);
   const scenario = getScenario(scenarioId);
   const language = scenario.defaultLanguage || 'de';
@@ -555,9 +696,13 @@ app.post('/api/scenario/start/stream', async (req, res) => {
     const session = voicePipeline.createSession(sessionId, {
       language,
       scenarioId: scenario.id,
+      conversationMode,
     });
-    const prefetched = consumeOpeningPrefetch(scenario.id, effectiveVoiceId);
-    const greeting = prefetched?.greeting || scenario.greeting;
+    const prefetched = consumeOpeningPrefetch(scenario.id, effectiveVoiceId, conversationMode);
+    const greeting = prefetched?.greeting || await buildScenarioOpening(scenario, {
+      sessionId,
+      conversationMode,
+    });
 
     send('session', {
       sessionId,
@@ -570,6 +715,8 @@ app.post('/api/scenario/start/stream', async (req, res) => {
     let chunkCount = 0;
     const ttsOpts = voicePipeline.ttsOptions(language);
     const prefetchedAudio = prefetched?.audioChunks;
+    const preSpeechDelayMs = samplePreSpeechDelayMs();
+    if (preSpeechDelayMs > 0) await sleep(preSpeechDelayMs);
     if (prefetchedAudio && prefetchedAudio.length) {
       for (const c of prefetchedAudio) {
         send('audio', { index: chunkCount++, ...c });
@@ -646,7 +793,8 @@ app.post('/api/scenario/start', async (req, res) => {
       });
     }
 
-    const { scenarioId, voiceId, sessionId: providedSessionId } = req.body || {};
+    const { scenarioId, voiceId, sessionId: providedSessionId, mode } = req.body || {};
+    const conversationMode = normalizeConversationMode(mode);
     const effectiveVoiceId = resolveVoiceId(voiceId);
     const scenario = getScenario(scenarioId);
 
@@ -657,11 +805,15 @@ app.post('/api/scenario/start', async (req, res) => {
     const session = voicePipeline.createSession(sessionId, {
       language: scenario.defaultLanguage || 'de',
       scenarioId: scenario.id,
+      conversationMode,
     });
     // Per-request voiceId only — if undefined (UI sent SDK-Default) the
     // SDK falls back to its built-in default voice, which is what the
     // colleague's reference script tests with.
-    const greeting = scenario.greeting;
+    const greeting = await buildScenarioOpening(scenario, {
+      sessionId,
+      conversationMode,
+    });
     const tts = await kugelAudioClient.textToSpeech(greeting, {
       ...voicePipeline.ttsOptions(scenario.defaultLanguage || 'de'),
       voiceId: effectiveVoiceId,
@@ -706,10 +858,11 @@ app.post('/api/scenario/prefetch', async (req, res) => {
         message: 'TTS sidecar is not reachable',
       });
     }
-    const { scenarioId, voiceId } = req.body || {};
+    const { scenarioId, voiceId, mode } = req.body || {};
+    const conversationMode = normalizeConversationMode(mode);
     const effectiveVoiceId = resolveVoiceId(voiceId);
     const scenario = getScenario(scenarioId);
-    const prefetched = await prefetchScenarioOpening(scenario.id, effectiveVoiceId);
+    const prefetched = await prefetchScenarioOpening(scenario.id, effectiveVoiceId, conversationMode);
     res.json({
       ok: true,
       cacheHit: !!prefetched.cacheHit,
@@ -773,7 +926,8 @@ app.post('/api/converse', async (req, res) => {
       });
     }
 
-    const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
+    const { text, sessionId: providedSessionId, voiceId, language, scenarioId, mode } = req.body || {};
+    const conversationMode = normalizeConversationMode(mode);
     const effectiveVoiceId = resolveVoiceId(voiceId);
     if (!text || typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'text is required' });
@@ -784,13 +938,31 @@ app.post('/api/converse', async (req, res) => {
 
     const sessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     if (!voicePipeline.activeSessions.has(sessionId)) {
-      voicePipeline.createSession(sessionId, { language: effectiveLanguage, scenarioId: scenario.id });
+      voicePipeline.createSession(sessionId, {
+        language: effectiveLanguage,
+        scenarioId: scenario.id,
+        conversationMode,
+      });
     }
+
+    const fakeLlmLatencyMs = FAKE_LLM_LATENCY_ENABLED
+      ? randomIntBetween(FAKE_LLM_LATENCY_MIN_MS, FAKE_LLM_LATENCY_MAX_MS)
+      : 0;
+    const withExtraAgentDelay = FAKE_AGENT_DELAY_ENABLED
+      && Number.isFinite(FAKE_AGENT_DELAY_CHANCE)
+      && FAKE_AGENT_DELAY_CHANCE > 0
+      && Math.random() < Math.min(1, FAKE_AGENT_DELAY_CHANCE);
+    const fakeAgentDelayMs = withExtraAgentDelay
+      ? randomIntBetween(FAKE_AGENT_DELAY_MIN_MS, FAKE_AGENT_DELAY_MAX_MS)
+      : 0;
+    const syntheticDelayMs = fakeLlmLatencyMs + fakeAgentDelayMs;
+    if (syntheticDelayMs > 0) await sleep(syntheticDelayMs);
 
     const result = await voicePipeline.processText(text, sessionId, {
       language,
       scenarioId: scenario.id,
       voiceId: effectiveVoiceId,
+      conversationMode,
     });
     const wav = pcmToWav(result.audio, result.sampleRate);
 
@@ -828,7 +1000,8 @@ app.post('/api/converse', async (req, res) => {
  */
 app.post('/api/converse/stream', async (req, res) => {
   const t0 = Date.now();
-  const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
+  const { text, sessionId: providedSessionId, voiceId, language, scenarioId, mode } = req.body || {};
+  const conversationMode = normalizeConversationMode(mode);
   const effectiveVoiceId = resolveVoiceId(voiceId);
   if (!text || typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ error: 'text is required' });
@@ -857,58 +1030,99 @@ app.post('/api/converse/stream', async (req, res) => {
   try {
     const sessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     if (!voicePipeline.activeSessions.has(sessionId)) {
-      voicePipeline.createSession(sessionId, { language: effectiveLanguage, scenarioId: scenario.id });
+      voicePipeline.createSession(sessionId, {
+        language: effectiveLanguage,
+        scenarioId: scenario.id,
+        conversationMode,
+      });
     }
     const session = voicePipeline.getSession(sessionId);
     // Allow the client to switch scenarios mid-session without creating a new session.
     if (scenario.id !== session.scenarioId) session.scenarioId = scenario.id;
+    session.conversationMode = conversationMode;
     send('session', { sessionId, scenarioId: session.scenarioId });
 
-    // Build conversation history for the model
-    const systemPrompt = voicePipeline._buildSystemPrompt(session.scenarioId);
-    const history = (session.context.conversation.messages || []).slice(-8).map((m) => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.text,
-    }));
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      ...history,
-      { role: 'user', content: text },
-    ];
-
-    // Two-stage flow that matches the colleague's reference pattern:
-    //   1) Stream LLM tokens to the browser as they arrive (so the user sees
-    //      text appear live).
-    //   2) Once LLM is done, hand the COMPLETE text to the Kugel SDK in
-    //      Python — `client.tts.stream_async(text=TEXT, ...)` — and forward
-    //      each AudioChunk to the browser. Full-text-in lets the model plan
-    //      prosody at paragraph level, which is what restores voice quality
-    //      vs. token-incremental streaming.
     const ttsOpts = voicePipeline.ttsOptions(effectiveLanguage);
+    const scenarioConfig = getScenario(session.scenarioId);
+    const llmStartedAt = Date.now();
+    const fakeLlmLatencyMs = FAKE_LLM_LATENCY_ENABLED
+      ? randomIntBetween(FAKE_LLM_LATENCY_MIN_MS, FAKE_LLM_LATENCY_MAX_MS)
+      : 0;
+    const withExtraAgentDelay = FAKE_AGENT_DELAY_ENABLED
+      && Number.isFinite(FAKE_AGENT_DELAY_CHANCE)
+      && FAKE_AGENT_DELAY_CHANCE > 0
+      && Math.random() < Math.min(1, FAKE_AGENT_DELAY_CHANCE);
+    const fakeAgentDelayMs = withExtraAgentDelay
+      ? randomIntBetween(FAKE_AGENT_DELAY_MIN_MS, FAKE_AGENT_DELAY_MAX_MS)
+      : 0;
+    const syntheticDelayMs = fakeLlmLatencyMs + fakeAgentDelayMs;
+    if (syntheticDelayMs > 0) await sleep(syntheticDelayMs);
 
     let fullText;
     let llmMs;
-    if (req.body?.skipLlm) {
+    const assistantHistoryCount = (session.context.conversation.messages || [])
+      .filter((m) => m.role === 'assistant')
+      .length;
+    const scriptedResponse = (conversationMode === 'script')
+      ? getScriptedAssistantTurn(scenarioConfig, assistantHistoryCount, text, { force: true })
+      : null;
+    if (scriptedResponse) {
+      fullText = scriptedResponse;
+      await emitPseudoDeltaStream(fullText, (chunk) => send('delta', { text: chunk }));
+      llmMs = Date.now() - llmStartedAt;
+    } else if (req.body?.skipLlm) {
       // Dev escape hatch — useful when watsonx is rate-limited and you only
       // want to exercise the TTS sidecar path. The user's text becomes the
       // assistant's response verbatim. Drop this if it ever ships beyond dev.
       fullText = text;
-      llmMs = 0;
-      send('delta', { text });
-    } else if (orchestrateClient) {
-      // Orchestrate path: non-streaming agent call. Emit the full response as
-      // a single delta so the existing client SSE handler still works.
-      const llmStartedAt = Date.now();
-      try {
-        const reply = await orchestrateClient.chat(messages, {
-          context: { sessionId, scenarioId: session.scenarioId },
-        });
-        fullText = (reply.text || '').trim();
-        if (fullText) send('delta', { text: fullText });
-      } catch (e) {
-        console.warn(`Orchestrate chat failed: ${e.message} — falling back to watsonx.ai`);
-      }
-      if (!fullText) {
+      await emitPseudoDeltaStream(fullText, (chunk) => send('delta', { text: chunk }));
+      llmMs = Date.now() - llmStartedAt;
+    } else {
+      const systemPrompt = voicePipeline._buildSystemPrompt(session.scenarioId);
+      const history = (session.context.conversation.messages || []).slice(-8).map((m) => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.text,
+      }));
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        ...history,
+        { role: 'user', content: text },
+      ];
+
+      // Two-stage flow that matches the colleague's reference pattern:
+      //   1) Stream LLM tokens to the browser as they arrive (so the user sees
+      //      text appear live).
+      //   2) Once LLM is done, hand the COMPLETE text to the Kugel SDK in
+      //      Python — `client.tts.stream_async(text=TEXT, ...)` — and forward
+      //      each AudioChunk to the browser. Full-text-in lets the model plan
+      //      prosody at paragraph level, which is what restores voice quality
+      //      vs. token-incremental streaming.
+      if (orchestrateClient) {
+        // Orchestrate path: non-streaming agent call. Emit the full response as
+        // a single delta so the existing client SSE handler still works.
+        try {
+          const reply = await orchestrateClient.chat(messages, {
+            context: { sessionId, scenarioId: session.scenarioId },
+          });
+          fullText = (reply.text || '').trim();
+          if (fullText) {
+            await emitPseudoDeltaStream(fullText, (chunk) => send('delta', { text: chunk }));
+          }
+        } catch (e) {
+          console.warn(`Orchestrate chat failed: ${e.message} — falling back to watsonx.ai`);
+        }
+        if (!fullText) {
+          const deploymentId = SCENARIO_DEPLOYMENTS[session.scenarioId] || undefined;
+          const result = await watsonxClient.chatStream(messages, {
+            deploymentId,
+            maxTokens: 180,
+            temperature: 0.7,
+            onDelta: (d) => send('delta', { text: d }),
+          });
+          fullText = result.fullText;
+        }
+        llmMs = Date.now() - llmStartedAt;
+      } else {
         const deploymentId = SCENARIO_DEPLOYMENTS[session.scenarioId] || undefined;
         const result = await watsonxClient.chatStream(messages, {
           deploymentId,
@@ -917,19 +1131,8 @@ app.post('/api/converse/stream', async (req, res) => {
           onDelta: (d) => send('delta', { text: d }),
         });
         fullText = result.fullText;
+        llmMs = Date.now() - llmStartedAt;
       }
-      llmMs = Date.now() - llmStartedAt;
-    } else {
-      const deploymentId = SCENARIO_DEPLOYMENTS[session.scenarioId] || undefined;
-      const llmStartedAt = Date.now();
-      const result = await watsonxClient.chatStream(messages, {
-        deploymentId,
-        maxTokens: 180,  // tighter responses — live voice is better with short turns
-        temperature: 0.7,
-        onDelta: (d) => send('delta', { text: d }),
-      });
-      fullText = result.fullText;
-      llmMs = Date.now() - llmStartedAt;
     }
 
     // Strip llama's habitual echo-question tag-ons before they hit TTS —
@@ -948,6 +1151,8 @@ app.post('/api/converse/stream', async (req, res) => {
       return;
     }
     try {
+      const preSpeechDelayMs = samplePreSpeechDelayMs();
+      if (preSpeechDelayMs > 0) await sleep(preSpeechDelayMs);
       const ttsResult = await streamTtsWithVoiceFallback(spokenText, {
         voiceId: effectiveVoiceId,
         language: ttsOpts.language,
@@ -1297,7 +1502,7 @@ function startLivekitAgent() {
 httpServer.on('error', (error) => {
   if (error?.code === 'EADDRINUSE') {
     console.warn(`[boot] port ${PORT} already in use. Another server instance is likely running.`);
-    console.warn(`[boot] re-use existing instance on http://localhost:${PORT} or stop stale node --watch processes first.`);
+    console.warn(`[boot] re-use existing instance on ${serverProtocol}://localhost:${PORT} or stop stale node --watch processes first.`);
     return;
   }
   throw error;
@@ -1338,7 +1543,7 @@ httpServer.listen(PORT, HOST, () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║  KugelAudio × watsonx Orchestrate Voice AI Integration     ║
-║  Server running on port ${PORT}
+║  Server running on ${serverProtocol}://localhost:${PORT}
 ║                                                            ║
 ║  REST API:                                                 ║
 ║    GET  /api/health          - Service health check        ║

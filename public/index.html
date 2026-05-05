@@ -89,6 +89,54 @@
   .chip.healthy .dot { background: var(--success); box-shadow: 0 0 6px rgba(12,206,107,.5); }
   .chip.down .dot { background: var(--danger); }
   .chip .arrow { width: 9px; height: 9px; }
+  .mode-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--fg-3);
+    font-size: 10px;
+    font-family: var(--mono);
+    user-select: none;
+  }
+  .mode-toggle .mode-label {
+    letter-spacing: 0.02em;
+  }
+  .mode-toggle .mode-label.active {
+    color: var(--fg-2);
+  }
+  .mode-toggle input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .mode-toggle .mode-slider {
+    width: 30px;
+    height: 16px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-1);
+    position: relative;
+    cursor: pointer;
+    transition: border-color 120ms ease;
+  }
+  .mode-toggle .mode-slider::after {
+    content: '';
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    background: var(--fg-3);
+    transition: transform 120ms ease, background 120ms ease;
+  }
+  .mode-toggle input:checked + .mode-slider::after {
+    transform: translateX(14px);
+    background: var(--fg-2);
+  }
+  .mode-toggle:hover .mode-slider {
+    border-color: var(--border-2);
+  }
 
   button.clear-btn {
     font: inherit;
@@ -797,6 +845,12 @@
       <svg class="arrow" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 2h6v6M10 2L3 9" stroke-linecap="round"/></svg>
     </a>
     <button id="clearBtn" class="clear-btn">Clear</button>
+    <label id="modeToggle" class="mode-toggle" aria-label="conversation mode">
+      <span id="modeScriptLabel" class="mode-label">M</span>
+      <input id="modeToggleSwitch" type="checkbox" role="switch" aria-label="Toggle free mode">
+      <span class="mode-slider" aria-hidden="true"></span>
+      <span id="modeFreeLabel" class="mode-label">F</span>
+    </label>
     <div id="status" class="chip"><span class="dot"></span><span id="statusText">checking…</span></div>
   </div>
 </header>
@@ -892,11 +946,13 @@
   const selectedVoiceId = 977;
   const selectedSpeechLang = 'de-DE';
   let sessionId = null;
+  let conversationMode = localStorage.getItem('conversationMode') === 'free' ? 'free' : 'script';
   let sending = false;
   let scenarios = [];
   let selectedScenarioId = null;
   let openingPrefetchPromise = null;
   let openingPrefetchScenarioId = null;
+  let openingPrefetchMode = null;
   let openingPrefetchDoneAt = 0;
   const VOICE_DEBUG = new URLSearchParams(window.location.search).get('voiceDebug') === '1'
     || localStorage.getItem('voiceDebug') === '1';
@@ -942,6 +998,49 @@
   const scenarioToggle = $('scenarioToggle');
   const emptyTitle = $('emptyTitle');
   const emptyLede = $('emptyLede');
+  const modeToggleSwitch = $('modeToggleSwitch');
+  const modeScriptLabel = $('modeScriptLabel');
+  const modeFreeLabel = $('modeFreeLabel');
+  const TEXT_REPLY_DELAY_MIN_MS = 140;
+  const TEXT_REPLY_DELAY_MAX_MS = 340;
+  const TEXT_REPLY_DELAY_LONG_PAUSE_CHANCE = 0.2;
+  const TEXT_REPLY_DELAY_LONG_PAUSE_MIN_MS = 70;
+  const TEXT_REPLY_DELAY_LONG_PAUSE_MAX_MS = 190;
+
+  function randomIntBetween(min, max) {
+    const low = Math.min(min, max);
+    const high = Math.max(min, max);
+    return Math.floor(Math.random() * (high - low + 1)) + low;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function waitForWrittenReplyDelay() {
+    let delayMs = randomIntBetween(TEXT_REPLY_DELAY_MIN_MS, TEXT_REPLY_DELAY_MAX_MS);
+    if (Math.random() < TEXT_REPLY_DELAY_LONG_PAUSE_CHANCE) {
+      delayMs += randomIntBetween(TEXT_REPLY_DELAY_LONG_PAUSE_MIN_MS, TEXT_REPLY_DELAY_LONG_PAUSE_MAX_MS);
+    }
+    await sleep(delayMs);
+  }
+
+  function applyConversationModeUi() {
+    if (modeToggleSwitch) modeToggleSwitch.checked = conversationMode === 'free';
+    modeScriptLabel?.classList.toggle('active', conversationMode === 'script');
+    modeFreeLabel?.classList.toggle('active', conversationMode === 'free');
+  }
+
+  function setConversationMode(mode) {
+    const normalized = mode === 'free' ? 'free' : 'script';
+    if (normalized === conversationMode) return;
+    conversationMode = normalized;
+    localStorage.setItem('conversationMode', conversationMode);
+    applyConversationModeUi();
+    sessionId = null;
+    prefetchScenarioOpening(selectedScenarioId);
+    resetThread();
+  }
 
   function currentScenario() {
     return scenarios.find((s) => s.id === selectedScenarioId) || scenarios[0];
@@ -981,12 +1080,14 @@
 
   function prefetchScenarioOpening(scenarioId) {
     if (!scenarioId) return;
-    if (openingPrefetchScenarioId === scenarioId && openingPrefetchPromise) return;
-    if (openingPrefetchScenarioId === scenarioId && (Date.now() - openingPrefetchDoneAt) < 90000) return;
+    if (openingPrefetchScenarioId === scenarioId && openingPrefetchMode === conversationMode && openingPrefetchPromise) return;
+    if (openingPrefetchScenarioId === scenarioId && openingPrefetchMode === conversationMode && (Date.now() - openingPrefetchDoneAt) < 90000) return;
 
     openingPrefetchScenarioId = scenarioId;
+    openingPrefetchMode = conversationMode;
     const body = { scenarioId };
     if (selectedVoiceId !== null && selectedVoiceId !== undefined) body.voiceId = selectedVoiceId;
+    body.mode = conversationMode;
 
     openingPrefetchPromise = fetch('/api/scenario/prefetch', {
       method: 'POST',
@@ -1033,6 +1134,7 @@
     try {
       const startBody = { scenarioId: s.id, sessionId };
       if (selectedVoiceId !== null && selectedVoiceId !== undefined) startBody.voiceId = selectedVoiceId;
+      startBody.mode = conversationMode;
       // Streaming greeting — first audio chunk lands in ~500ms instead of
       // ~1-3s, because we no longer block on the full TTS synthesis.
       if (audioCtx && audioCtx.state === 'suspended') {
@@ -1257,6 +1359,7 @@
   async function fetchScenarioStartFallback(scenarioId) {
     const body = { scenarioId, sessionId };
     if (selectedVoiceId !== null && selectedVoiceId !== undefined) body.voiceId = selectedVoiceId;
+    body.mode = conversationMode;
     const r = await fetch('/api/scenario/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1272,6 +1375,7 @@
   async function fetchConverseFallback(text) {
     const body = { text, sessionId, scenarioId: selectedScenarioId };
     if (selectedVoiceId !== null && selectedVoiceId !== undefined) body.voiceId = selectedVoiceId;
+    body.mode = conversationMode;
     const r = await fetch('/api/converse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1297,6 +1401,7 @@
     try {
       const convBody = { text, sessionId, scenarioId: selectedScenarioId };
       if (selectedVoiceId !== null && selectedVoiceId !== undefined) convBody.voiceId = selectedVoiceId;
+      convBody.mode = conversationMode;
       const r = await fetch('/api/converse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1308,6 +1413,7 @@
       }
       const d = await r.json();
       sessionId = d.sessionId;
+      await waitForWrittenReplyDelay();
       pending.remove();
       addMessage({
         role: 'assistant',
@@ -1592,6 +1698,12 @@
       showError('Live voice mode needs Chrome or Edge (Web Speech API).');
       return false;
     }
+    if (!window.isSecureContext) {
+      micUnavailableReason = 'Unsicherer Kontext erkannt. Bitte https://localhost:3000 verwenden und das Zertifikat akzeptieren.';
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      micUnavailableReason = 'Browser unterstuetzt keinen Mikrofonzugriff ueber mediaDevices.getUserMedia.';
+    }
     try {
       if (!audioCtx) {
         const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -1751,9 +1863,15 @@
   function startLiveListening() {
     if (!liveActive) return;
     dbg('live listening start');
+    hideLiveWarn();
     setOrbState('listening');
     if (micUnavailableReason) {
       showLiveWarn(`${micUnavailableReason} Du kannst unten tippen.`);
+      setOrbState('idle');
+      liveTranscript.className = 'live-transcript empty';
+      liveTranscript.textContent = 'Mikrofon blockiert. Bitte unten tippen oder Berechtigungen freigeben.';
+      liveFallbackInput?.focus();
+      return;
     }
     liveRecog = new SRctor();
     liveRecog.continuous = true;
@@ -1761,7 +1879,6 @@
     liveRecog.lang = selectedSpeechLang;
 
     liveBuffer = '';
-    hideLiveWarn();
     liveTranscript.className = 'live-transcript empty';
     liveTranscript.textContent = 'Ich höre zu …';
 
@@ -1878,6 +1995,7 @@
     try {
       const reqBody = { text, sessionId, scenarioId: selectedScenarioId };
       if (selectedVoiceId !== null && selectedVoiceId !== undefined) reqBody.voiceId = selectedVoiceId;
+      reqBody.mode = conversationMode;
       const r = await fetch('/api/converse/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1952,6 +2070,7 @@
       }
       await pcmStreamFinished();
       dbg('playback finished', { audioChunkCount, streamDone });
+      await waitForWrittenReplyDelay();
       pending.remove();
       console.log(`[turn] audioChunks=${audioChunkCount}`);
       if (audioChunkCount === 0) {
@@ -1973,6 +2092,7 @@
         showError('Streaming-TTS fehlgeschlagen, nutze Fallback …');
         const d = await fetchConverseFallback(text);
         sessionId = d.sessionId;
+        await waitForWrittenReplyDelay();
         addMessage({
           role: 'assistant',
           text: d.responseText || '',
@@ -1992,6 +2112,10 @@
 
   goLiveBtn?.addEventListener('click', liveStart);
   heroStartBtn?.addEventListener('click', startScenarioConversation);
+  modeToggleSwitch?.addEventListener('change', (e) => {
+    const target = e.currentTarget;
+    setConversationMode(target?.checked ? 'free' : 'script');
+  });
   liveStopBtn?.addEventListener('click', liveStop);
 
   // ─── Phase 2a: LiveKit audio-quality probe ───────────────────
@@ -2164,6 +2288,7 @@
   }
 
   loadScenarios();
+  applyConversationModeUi();
   checkHealth();
   input.focus();
 </script>

@@ -1,7 +1,7 @@
 import KugelAudioClient from './kugelaudio-client.js';
 import WatsonxClient from './watsonx-client.js';
 import { classifyIntent, generateResponse, buildAgentContext } from './agents/customer-service-agent.js';
-import { getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
+import { getScenario, getScriptedAssistantTurn, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
 import { cleanLlmText } from './agents/text-cleanup.js';
 
 /**
@@ -68,6 +68,7 @@ class VoicePipeline {
       id: sessionId,
       context,
       scenarioId: scenario.id,
+      conversationMode: options.conversationMode === 'script' ? 'script' : 'free',
       conversationId: `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       startTime: Date.now(),
       messageCount: 0,
@@ -96,53 +97,68 @@ class VoicePipeline {
    * Process a user text turn: agent response + KugelAudio TTS.
    * Returns { userText, responseText, audio, sampleRate, audioFormat, intent, escalated, processingTime }.
    */
-  async processText(userText, sessionId, { language, scenarioId, voiceId } = {}) {
+  async processText(userText, sessionId, { language, scenarioId, voiceId, conversationMode } = {}) {
     const startTime = Date.now();
     const session = this.getSession(sessionId);
 
     if (scenarioId && scenarioId !== session.scenarioId) {
       session.scenarioId = scenarioId;
     }
+    if (conversationMode === 'script' || conversationMode === 'free') {
+      session.conversationMode = conversationMode;
+    }
     if (language) session.context.conversation.language = language;
     const activeLanguage = session.context.conversation.language || this.voiceConfig.language;
+
+    const scenario = getScenario(session.scenarioId);
+    const assistantHistoryCount = (session.context.conversation.messages || [])
+      .filter((m) => m.role === 'assistant')
+      .length;
 
     const intentResult = classifyIntent(userText);
     session.context.conversation.intent = intentResult.intent;
 
-    const systemPrompt = this._buildSystemPrompt(session.scenarioId);
-    const history = (session.context.conversation.messages || []).slice(-8).map(m => ({
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.text,
-    }));
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      ...history,
-      { role: 'user', content: userText },
-    ];
-
     let responseText;
     let usage;
-    if (this.orchestrateClient) {
-      try {
-        const reply = await this.orchestrateClient.chat(messages, {
-          context: { sessionId, scenarioId: session.scenarioId },
-        });
-        responseText = reply.text?.trim();
-      } catch (error) {
-        console.warn(`[${sessionId}] orchestrate chat failed: ${error.message} — falling back to watsonx.ai`);
+    const scriptedResponse = (session.conversationMode === 'script')
+      ? getScriptedAssistantTurn(scenario, assistantHistoryCount, userText, { force: true })
+      : null;
+    if (scriptedResponse) {
+      responseText = scriptedResponse;
+    } else {
+      const systemPrompt = this._buildSystemPrompt(session.scenarioId);
+      const history = (session.context.conversation.messages || []).slice(-8).map(m => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: m.text,
+      }));
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        ...history,
+        { role: 'user', content: userText },
+      ];
+
+      if (this.orchestrateClient) {
+        try {
+          const reply = await this.orchestrateClient.chat(messages, {
+            context: { sessionId, scenarioId: session.scenarioId },
+          });
+          responseText = reply.text?.trim();
+        } catch (error) {
+          console.warn(`[${sessionId}] orchestrate chat failed: ${error.message} — falling back to watsonx.ai`);
+        }
       }
-    }
-    if (!responseText) {
-      try {
-        const reply = await this.watsonxClient.chat(messages, { maxTokens: 250, temperature: 0.7 });
-        responseText = reply.text?.trim();
-        usage = reply.usage;
-      } catch (error) {
-        console.warn(`[${sessionId}] watsonx chat failed: ${error.message} — falling back to local agent`);
+      if (!responseText) {
+        try {
+          const reply = await this.watsonxClient.chat(messages, { maxTokens: 250, temperature: 0.7 });
+          responseText = reply.text?.trim();
+          usage = reply.usage;
+        } catch (error) {
+          console.warn(`[${sessionId}] watsonx chat failed: ${error.message} — falling back to local agent`);
+        }
       }
-    }
-    if (!responseText) {
-      responseText = await generateResponse(intentResult.intent, session.context, userText);
+      if (!responseText) {
+        responseText = await generateResponse(intentResult.intent, session.context, userText);
+      }
     }
 
     if (intentResult.shouldEscalate) {

@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "start:https": "LOCAL_HTTPS=true node src/server.js",
+    "dev:https": "LOCAL_HTTPS=true node --watch src/server.js",
     "amplify:claims": "node scripts/amplify-dataset.js claims",
     "amplify:hotline": "node scripts/amplify-dataset.js hotline",
     "tune:claims": "node scripts/tune-watsonx.js claims",

@@ -63,6 +63,21 @@ For development with auto-reload:
 npm run dev
 ```
 
+### Local HTTPS for microphone access (Chrome)
+
+For reliable microphone permissions in Chrome, run the app over HTTPS:
+
+```bash
+npm run dev:https
+```
+
+This expects local cert files at:
+
+- `.cert/localhost-cert.pem`
+- `.cert/localhost-key.pem`
+
+You can override paths via `LOCAL_HTTPS_CERT_PATH` / `LOCAL_HTTPS_KEY_PATH`.
+
 ## Architecture Overview
 
 ### System Components

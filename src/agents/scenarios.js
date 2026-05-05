@@ -21,6 +21,52 @@ const SHARED_VOICE_RULES = [
   'Wenn alle Pflichtfelder beisammen sind, stelle KEINE Frage mehr — bestätige nur und beende mit Punkt.',
 ].join(' ');
 
+const CLAIMS_HARDCODED_ASSISTANT_TURNS = [
+  'Guten Tag, hier ist Andreas vom Schadensservice Ihrer Versicherung. Um welche Art von Schaden handelt es sich?',
+  'Das tut mir leid zu hören. Damit ich den Vorgang anlegen kann, nennen Sie mir bitte zunächst Ihren vollständigen Namen.',
+  'Vielen Dank, Frau Harzheim. Können Sie mir bitte Ihre Policennummer durchgeben?',
+  'Ich wiederhole zur Sicherheit: 1 2 3. Ist das korrekt?',
+  'Wann genau ist der Unfall passiert?',
+  'Also am 5. Mai 2026 um 8 Uhr. Und wo hat sich der Unfall ereignet?',
+  'Aachener Straße in Köln, ich habe das notiert. Waren weitere Personen beteiligt?',
+  'Viktor. Habe ich das richtig verstanden?',
+  'Gab es Verletzte?',
+  'Nein, zum Glück nicht. Das ist notiert. Können Sie die Schadenshöhe an Ihrem Fahrzeug schon ungefähr einschätzen?',
+  'Dreitausend Euro, ist notiert. Ich fasse Ihre Schadensmeldung kurz zusammen: Frau Franziska Harzheim, Policennummer 1 2 3. Keine Verletzten, geschätzte Schadenshöhe dreitausend Euro. Ist alles korrekt?',
+  'Vielen Dank. Ihre Vorgangsnummer lautet 8 8 1 0. Sie erhalten innerhalb der nächsten 24 Stunden eine schriftliche Bestätigung per E-Mail. Kann ich sonst noch etwas für Sie tun?',
+  'Ich danke Ihnen, Frau Harzheim. Schönen Tag noch.',
+];
+
+const CLAIMS_SCRIPTED_USER_PATTERNS = [
+  /auffahrunfall|hinten\s+reingefahren/i,
+  /franziska\s+harzheim/i,
+  /policennummer.*1\s*2\s*3|1\s*2\s*3/i,
+  /\bja\b.*(stimmt|korrekt)|\bstimmt\b/i,
+  /5\.\s*mai\s*2026|8\s*uhr|heute\s*morgen/i,
+  /k(ö|oe)ln|aachener/i,
+  /viktor|beteiligte/i,
+  /\bgenau\b|richtig\s+verstanden/i,
+  /keine?\s+verletzten|nur\s+blechschaden/i,
+  /dreitausend|3[.,]?\s*000|3000/i,
+  /\bja\b.*(alles|richtig|korrekt)|alles\s+richtig/i,
+  /nein.*(das war'?s|sonst nichts)|danke/i,
+];
+
+function normalizeForScriptMatch(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/[^\p{L}\p{N}\s./-]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function patternMatches(pattern, text) {
+  if (!pattern || !text) return false;
+  if (pattern instanceof RegExp) return pattern.test(text);
+  return text.includes(String(pattern).toLowerCase());
+}
+
 export const scenarios = {
   claims: {
     id: 'claims',
@@ -29,8 +75,9 @@ export const scenarios = {
     description:
       'Der Agent nimmt eine KFZ-, Hausrat- oder Haftpflicht-Schadensmeldung auf, extrahiert Schadensart, Ort, Zeit, Beteiligte, Schadenshöhe und Policennummer — und liest die Daten zur Bestätigung strukturiert zurück.',
     defaultLanguage: 'de',
-    greeting:
-      'Guten Tag, hier ist der Schadensmelde-Assistent. Ich nehme Ihren Schadensfall auf. Sagen Sie mir zuerst, um welche Art von Schaden es sich handelt und wann er passiert ist.',
+    greeting: CLAIMS_HARDCODED_ASSISTANT_TURNS[0],
+    scriptedAssistantTurns: CLAIMS_HARDCODED_ASSISTANT_TURNS,
+    scriptedUserPatterns: CLAIMS_SCRIPTED_USER_PATTERNS,
     suggestions: [
       'Ich hatte gestern gegen 17 Uhr 30 einen Auffahrunfall in München, Leopoldstraße 128. Meine Policennummer ist HD 4 7 2 9 1 B.',
       'Bei mir zuhause ist ein Wasserschaden entstanden, Schätzung 4250 Euro, Hausratversicherung Nummer HV 9 9 8 2 7 3.',
@@ -68,4 +115,27 @@ export function listScenarios() {
   }));
 }
 
-export default { scenarios, getScenario, listScenarios, DEFAULT_SCENARIO_ID };
+export function getScriptedAssistantTurn(scenario, assistantHistoryCount, userText, { force = false } = {}) {
+  if (!scenario) return null;
+  const turns = Array.isArray(scenario.scriptedAssistantTurns) ? scenario.scriptedAssistantTurns : null;
+  if (!turns || !turns.length) return null;
+
+  const turnIndex = Math.min(Math.max(assistantHistoryCount, 0), turns.length - 1);
+  if (turnIndex === 0) return turns[0];
+  if (force) return turns[turnIndex];
+
+  const patterns = Array.isArray(scenario.scriptedUserPatterns) ? scenario.scriptedUserPatterns : [];
+  const expectedPattern = patterns[turnIndex - 1];
+  const normalizedUser = normalizeForScriptMatch(userText);
+  if (!patternMatches(expectedPattern, normalizedUser)) return null;
+
+  return turns[turnIndex];
+}
+
+export default {
+  scenarios,
+  getScenario,
+  listScenarios,
+  getScriptedAssistantTurn,
+  DEFAULT_SCENARIO_ID,
+};

@@ -1,0 +1,12 @@
+---
+description: Persist session context in MEMORY.md
+alwaysApply: true
+---
+
+# Session memory persistence
+
+- At the beginning of each substantial task, read `MEMORY.md` in the repository root if it exists.
+- Treat `MEMORY.md` as the canonical session memory for preferences, decisions, assumptions, and unresolved questions.
+- After new decisions, corrections, or constraints appear, append a short update to `MEMORY.md`.
+- Keep entries concise and factual; avoid duplicates and stale notes.
+- Do not delete older entries unless they are explicitly marked obsolete.

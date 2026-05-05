@@ -1,0 +1,12 @@
+---
+description: Keep responses direct without repeated greetings
+alwaysApply: true
+---
+
+# No repeated greeting
+
+- Do not start each new response with a greeting or introduction.
+- Start directly with the answer, action, or requested result.
+- Keep the tone friendly but concise.
+- Apply this behavior to voice output as well.
+- In voice mode, skip salutations and filler, go straight to the point.
