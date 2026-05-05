@@ -651,10 +651,9 @@
     inset: 10px;
     border-radius: 50%;
     pointer-events: none;
-    opacity: 0;
-    transition: opacity 200ms;
+    display: none;
   }
-  .live-orb.listening #orbWave { opacity: 1; }
+  .live-orb.listening #orbWave { display: none; }
 
   /* Three concentric expanding rings, driven off --mic-level */
   .orb-ring {
@@ -896,6 +895,9 @@
   let sending = false;
   let scenarios = [];
   let selectedScenarioId = null;
+  let openingPrefetchPromise = null;
+  let openingPrefetchScenarioId = null;
+  let openingPrefetchDoneAt = 0;
   const VOICE_DEBUG = new URLSearchParams(window.location.search).get('voiceDebug') === '1'
     || localStorage.getItem('voiceDebug') === '1';
   const debugLogQueue = [];
@@ -970,10 +972,45 @@
     renderSuggestions();
     applyScenarioEmptyState();
     resetThread();
+    prefetchScenarioOpening(id);
     // Auto-greet only on explicit user action — browsers block autoplay otherwise.
     if (!auto) {
       await startScenarioConversation();
     }
+  }
+
+  function prefetchScenarioOpening(scenarioId) {
+    if (!scenarioId) return;
+    if (openingPrefetchScenarioId === scenarioId && openingPrefetchPromise) return;
+    if (openingPrefetchScenarioId === scenarioId && (Date.now() - openingPrefetchDoneAt) < 90000) return;
+
+    openingPrefetchScenarioId = scenarioId;
+    const body = { scenarioId };
+    if (selectedVoiceId !== null && selectedVoiceId !== undefined) body.voiceId = selectedVoiceId;
+
+    openingPrefetchPromise = fetch('/api/scenario/prefetch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`prefetch HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d) => {
+        openingPrefetchDoneAt = Date.now();
+        dbg('opening prefetch ready', {
+          scenarioId: d.scenarioId,
+          cacheHit: d.cacheHit,
+          chunks: d.chunks,
+        });
+      })
+      .catch((e) => {
+        dbg('opening prefetch failed', e.message);
+      })
+      .finally(() => {
+        openingPrefetchPromise = null;
+      });
   }
 
   // Entry point for the hero "Gespräch starten" button. Opens the live overlay,
@@ -982,6 +1019,9 @@
   async function startScenarioConversation() {
     const s = currentScenario();
     if (!s) return;
+    if (openingPrefetchPromise && openingPrefetchScenarioId === s.id) {
+      try { await openingPrefetchPromise; } catch {}
+    }
     const ready = await ensureLiveReady();
     if (!ready) return;
 
@@ -1143,6 +1183,7 @@
     // once scenarios are known — so the two cases are front-and-centre.
     if (scenarios.length) resetThread();
     else applyScenarioEmptyState();
+    if (selectedScenarioId) prefetchScenarioOpening(selectedScenarioId);
   }
 
   function scrollToBottom() {

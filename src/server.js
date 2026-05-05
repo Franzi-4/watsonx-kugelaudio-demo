@@ -62,14 +62,23 @@ const kugelAudioClient = new KugelAudioClient({
   modelId: process.env.KUGELAUDIO_MODEL_ID || 'kugel-2-turbo',
 });
 
+const DEFAULT_TTS_VOICE_ID = process.env.KUGELAUDIO_VOICE_ID
+  ? Number(process.env.KUGELAUDIO_VOICE_ID)
+  : undefined;
+const ALLOW_DEFAULT_VOICE_FALLBACK = process.env.KUGELAUDIO_ALLOW_DEFAULT_VOICE_FALLBACK === 'true';
+
+function resolveVoiceId(voiceId) {
+  if (voiceId === undefined || voiceId === null || voiceId === '') return DEFAULT_TTS_VOICE_ID;
+  const parsed = Number(voiceId);
+  return Number.isFinite(parsed) ? parsed : DEFAULT_TTS_VOICE_ID;
+}
+
 /**
  * Stream TTS and retry once without voiceId when provider-specific voice
  * selection fails (e.g. timeout/aborted for one voice profile).
  */
 async function streamTtsWithVoiceFallback(text, opts) {
-  const requestedVoiceId = (opts.voiceId === undefined || opts.voiceId === null)
-    ? undefined
-    : Number(opts.voiceId);
+  const requestedVoiceId = resolveVoiceId(opts.voiceId);
   const baseOpts = {
     language: opts.language,
     cfgScale: opts.cfgScale,
@@ -85,6 +94,12 @@ async function streamTtsWithVoiceFallback(text, opts) {
     return { usedFallback: false, usedVoiceId: requestedVoiceId };
   } catch (error) {
     if (requestedVoiceId === undefined) throw error;
+    if (!ALLOW_DEFAULT_VOICE_FALLBACK) {
+      console.warn(
+        `[${opts.logTag || 'tts'}] stream failed with pinned voiceId=${requestedVoiceId}: ${error.message} — fallback disabled`,
+      );
+      throw error;
+    }
     console.warn(
       `[${opts.logTag || 'tts'}] stream failed with voiceId=${requestedVoiceId}: ${error.message} — retrying with SDK default voice`,
     );
@@ -293,10 +308,24 @@ app.get('/api/agents', async (req, res) => {
  * greeting; selection happens via `scenarioId` on POST /api/converse.
  */
 app.get('/api/scenarios', (req, res) => {
-  res.json({
+  const payload = {
     scenarios: listScenarios(),
     defaultScenarioId: DEFAULT_SCENARIO_ID,
-  });
+  };
+  res.json(payload);
+
+  const defaultScenarioId = payload.defaultScenarioId || payload.scenarios?.[0]?.id;
+  if (defaultScenarioId) {
+    prefetchScenarioOpening(defaultScenarioId, DEFAULT_TTS_VOICE_ID)
+      .then((d) => {
+        console.log(
+          `[scenario/prefetch] warmup ready scenario=${d.scenarioId} chunks=${d.audioChunks?.length || 0} cacheHit=${d.cacheHit ? 'yes' : 'no'}`,
+        );
+      })
+      .catch((error) => {
+        console.warn(`[scenario/prefetch] warmup failed: ${error.message}`);
+      });
+  }
 });
 
 /**
@@ -332,6 +361,111 @@ app.get('/api/voices', async (req, res) => {
 
 // Pre-rendered greeting audio cache for instant playback on "Gespräch starten".
 const greetingCache = new Map();
+const openingPrefetchCache = new Map();
+const OPENING_PREFETCH_TTL_MS = 2 * 60 * 1000;
+
+function openingPrefetchKey(scenarioId, voiceId) {
+  const v = (voiceId === undefined || voiceId === null) ? 'default' : String(Number(voiceId));
+  return `${scenarioId}::${v}`;
+}
+
+function getFreshOpeningPrefetch(scenarioId, voiceId) {
+  const key = openingPrefetchKey(scenarioId, voiceId);
+  const hit = openingPrefetchCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expiresAt) {
+    openingPrefetchCache.delete(key);
+    return null;
+  }
+  return hit;
+}
+
+function consumeOpeningPrefetch(scenarioId, voiceId) {
+  const key = openingPrefetchKey(scenarioId, voiceId);
+  const hit = getFreshOpeningPrefetch(scenarioId, voiceId);
+  if (!hit) return null;
+  openingPrefetchCache.delete(key);
+  return hit;
+}
+
+async function buildScenarioOpening(scenario, { sessionId } = {}) {
+  const openerMessages = [
+    { role: 'system', content: scenario.systemPrompt },
+    {
+      role: 'user',
+      content: 'Starte das Gespräch jetzt als erster Agent-Turn. Schreibe genau eine kurze, natürliche Begrüßung für den Kunden und eine konkrete erste Frage. Deutsch, maximal 2 Sätze.',
+    },
+  ];
+
+  let openingText = '';
+  if (orchestrateClient) {
+    try {
+      const reply = await orchestrateClient.chat(openerMessages, {
+        context: { sessionId, scenarioId: scenario.id, prefetch: true, turn: 'opening' },
+      });
+      openingText = (reply.text || '').trim();
+    } catch (error) {
+      console.warn(`[prefetch] orchestrate opening failed: ${error.message}`);
+    }
+  }
+
+  if (!openingText) {
+    try {
+      const reply = await watsonxClient.chat(openerMessages, {
+        maxTokens: 120,
+        temperature: 0.6,
+      });
+      openingText = (reply.text || '').trim();
+    } catch (error) {
+      console.warn(`[prefetch] watsonx opening failed: ${error.message}`);
+    }
+  }
+
+  if (!openingText) return scenario.greeting;
+  return cleanLlmText(openingText, { language: scenario.defaultLanguage || 'de' }) || scenario.greeting;
+}
+
+async function prefetchScenarioOpening(scenarioId, voiceId) {
+  const scenario = getScenario(scenarioId);
+  const existing = getFreshOpeningPrefetch(scenario.id, voiceId);
+  if (existing) return { ...existing, cacheHit: true };
+
+  const language = scenario.defaultLanguage || 'de';
+  const openingText = await buildScenarioOpening(scenario, {
+    sessionId: `prefetch_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+  });
+  const ttsOpts = voicePipeline.ttsOptions(language);
+  const chunks = [];
+
+  const ttsResult = await streamTtsWithVoiceFallback(openingText, {
+    voiceId,
+    language: ttsOpts.language,
+    cfgScale: ttsOpts.cfgScale,
+    normalize: ttsOpts.normalize,
+    logTag: 'scenario/prefetch',
+    onAudio: ({ pcm, sampleRate, samples }) => {
+      chunks.push({
+        pcm: pcm.toString('base64'),
+        sampleRate,
+        samples,
+        encoding: 'pcm_s16le',
+      });
+    },
+  });
+
+  const record = {
+    scenarioId: scenario.id,
+    language,
+    greeting: openingText,
+    audioChunks: chunks,
+    usedFallbackVoice: ttsResult.usedFallback,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + OPENING_PREFETCH_TTL_MS,
+    cacheHit: false,
+  };
+  openingPrefetchCache.set(openingPrefetchKey(scenario.id, voiceId), record);
+  return record;
+}
 
 async function prerenderGreeting(scenarioId) {
   const scenario = getScenario(scenarioId);
@@ -394,6 +528,7 @@ async function ensureTtsSidecarReady(timeoutMs = 12000) {
 app.post('/api/scenario/start/stream', async (req, res) => {
   const t0 = Date.now();
   const { scenarioId, voiceId, sessionId: providedSessionId } = req.body || {};
+  const effectiveVoiceId = resolveVoiceId(voiceId);
   const scenario = getScenario(scenarioId);
   const language = scenario.defaultLanguage || 'de';
 
@@ -421,7 +556,8 @@ app.post('/api/scenario/start/stream', async (req, res) => {
       language,
       scenarioId: scenario.id,
     });
-    const greeting = scenario.greeting;
+    const prefetched = consumeOpeningPrefetch(scenario.id, effectiveVoiceId);
+    const greeting = prefetched?.greeting || scenario.greeting;
 
     send('session', {
       sessionId,
@@ -433,41 +569,47 @@ app.post('/api/scenario/start/stream', async (req, res) => {
 
     let chunkCount = 0;
     const ttsOpts = voicePipeline.ttsOptions(language);
-    // Fast path: replay the pre-rendered greeting if the user is on the default
-    // voice. ~0ms vs. ~500-1500ms for a fresh Kugel synthesis.
-    const cached = (voiceId === undefined || voiceId === null)
-      ? greetingCache.get(scenario.id)
-      : null;
-    if (cached && cached.length) {
-      for (const c of cached) {
+    const prefetchedAudio = prefetched?.audioChunks;
+    if (prefetchedAudio && prefetchedAudio.length) {
+      for (const c of prefetchedAudio) {
         send('audio', { index: chunkCount++, ...c });
       }
-      console.log(`[scenario/start/stream] ${sessionId} cache hit (${cached.length} chunks)`);
+      console.log(`[scenario/start/stream] ${sessionId} prefetch hit (${prefetchedAudio.length} chunks)`);
     } else {
-      try {
-        const ttsResult = await streamTtsWithVoiceFallback(greeting, {
-          voiceId,
-          language: ttsOpts.language,
-          cfgScale: ttsOpts.cfgScale,
-          normalize: ttsOpts.normalize,
-          logTag: 'scenario/start',
-          onAudio: ({ pcm, sampleRate, samples }) => {
-            chunkCount++;
-            send('audio', {
-              index: chunkCount - 1,
-              pcm: pcm.toString('base64'),
-              sampleRate,
-              samples,
-              encoding: 'pcm_s16le',
-            });
-          },
-        });
-        if (ttsResult.usedFallback) {
-          console.log(`[scenario/start/stream] ${sessionId} retried with SDK default voice`);
+      const cached = (effectiveVoiceId === undefined || effectiveVoiceId === null)
+        ? greetingCache.get(scenario.id)
+        : null;
+      if (cached && greeting === scenario.greeting) {
+        for (const c of cached) {
+          send('audio', { index: chunkCount++, ...c });
         }
-      } catch (e) {
-        console.warn(`[scenario/start] TTS stream failed: ${e.message}`);
-        send('error', { message: `tts: ${e.message}` });
+        console.log(`[scenario/start/stream] ${sessionId} static cache hit (${cached.length} chunks)`);
+      } else {
+        try {
+          const ttsResult = await streamTtsWithVoiceFallback(greeting, {
+            voiceId: effectiveVoiceId,
+            language: ttsOpts.language,
+            cfgScale: ttsOpts.cfgScale,
+            normalize: ttsOpts.normalize,
+            logTag: 'scenario/start',
+            onAudio: ({ pcm, sampleRate, samples }) => {
+              chunkCount++;
+              send('audio', {
+                index: chunkCount - 1,
+                pcm: pcm.toString('base64'),
+                sampleRate,
+                samples,
+                encoding: 'pcm_s16le',
+              });
+            },
+          });
+          if (ttsResult.usedFallback) {
+            console.log(`[scenario/start/stream] ${sessionId} retried with SDK default voice`);
+          }
+        } catch (e) {
+          console.warn(`[scenario/start] TTS stream failed: ${e.message}`);
+          send('error', { message: `tts: ${e.message}` });
+        }
       }
     }
 
@@ -505,6 +647,7 @@ app.post('/api/scenario/start', async (req, res) => {
     }
 
     const { scenarioId, voiceId, sessionId: providedSessionId } = req.body || {};
+    const effectiveVoiceId = resolveVoiceId(voiceId);
     const scenario = getScenario(scenarioId);
 
     // Fresh session every time a scenario is started, so the system prompt
@@ -521,7 +664,7 @@ app.post('/api/scenario/start', async (req, res) => {
     const greeting = scenario.greeting;
     const tts = await kugelAudioClient.textToSpeech(greeting, {
       ...voicePipeline.ttsOptions(scenario.defaultLanguage || 'de'),
-      voiceId: voiceId !== undefined ? Number(voiceId) : undefined,
+      voiceId: effectiveVoiceId,
     });
     const wav = pcmToWav(tts.audio, tts.sampleRate);
 
@@ -546,6 +689,38 @@ app.post('/api/scenario/start', async (req, res) => {
   } catch (error) {
     console.error('scenario/start error:', error);
     res.status(500).json({ error: 'scenario start failed', message: error.message });
+  }
+});
+
+/**
+ * Prefetch first-turn opening (Orchestrate + TTS) before the user presses
+ * "Gespräch starten", so start playback can happen immediately on click.
+ *
+ * POST /api/scenario/prefetch { scenarioId, voiceId? }
+ */
+app.post('/api/scenario/prefetch', async (req, res) => {
+  try {
+    if (!(await ensureTtsSidecarReady())) {
+      return res.status(503).json({
+        error: 'tts_unavailable',
+        message: 'TTS sidecar is not reachable',
+      });
+    }
+    const { scenarioId, voiceId } = req.body || {};
+    const effectiveVoiceId = resolveVoiceId(voiceId);
+    const scenario = getScenario(scenarioId);
+    const prefetched = await prefetchScenarioOpening(scenario.id, effectiveVoiceId);
+    res.json({
+      ok: true,
+      cacheHit: !!prefetched.cacheHit,
+      scenarioId: prefetched.scenarioId,
+      greeting: prefetched.greeting,
+      chunks: prefetched.audioChunks?.length || 0,
+      expiresAt: prefetched.expiresAt,
+    });
+  } catch (error) {
+    console.warn(`[scenario/prefetch] failed: ${error.message}`);
+    res.status(500).json({ ok: false, error: 'prefetch_failed', message: error.message });
   }
 });
 
@@ -576,7 +751,7 @@ app.post('/api/tts', async (req, res) => {
       return res.status(400).json({ error: 'text is required' });
     }
     const tts = await kugelAudioClient.textToSpeech(text, {
-      voiceId: voiceId !== undefined ? Number(voiceId) : (process.env.KUGELAUDIO_VOICE_ID ? Number(process.env.KUGELAUDIO_VOICE_ID) : undefined),
+      voiceId: resolveVoiceId(voiceId),
       language: language || process.env.KUGELAUDIO_LANGUAGE || 'de',
     });
     const wav = pcmToWav(tts.audio, tts.sampleRate);
@@ -599,6 +774,7 @@ app.post('/api/converse', async (req, res) => {
     }
 
     const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
+    const effectiveVoiceId = resolveVoiceId(voiceId);
     if (!text || typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'text is required' });
     }
@@ -614,7 +790,7 @@ app.post('/api/converse', async (req, res) => {
     const result = await voicePipeline.processText(text, sessionId, {
       language,
       scenarioId: scenario.id,
-      voiceId: voiceId !== undefined ? Number(voiceId) : undefined,
+      voiceId: effectiveVoiceId,
     });
     const wav = pcmToWav(result.audio, result.sampleRate);
 
@@ -653,6 +829,7 @@ app.post('/api/converse', async (req, res) => {
 app.post('/api/converse/stream', async (req, res) => {
   const t0 = Date.now();
   const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
+  const effectiveVoiceId = resolveVoiceId(voiceId);
   if (!text || typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ error: 'text is required' });
   }
@@ -772,7 +949,7 @@ app.post('/api/converse/stream', async (req, res) => {
     }
     try {
       const ttsResult = await streamTtsWithVoiceFallback(spokenText, {
-        voiceId,
+        voiceId: effectiveVoiceId,
         language: ttsOpts.language,
         cfgScale: ttsOpts.cfgScale,
         normalize: ttsOpts.normalize,

@@ -31,14 +31,14 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger("livekit-agent")
 
-# Don't read KUGELAUDIO_VOICE_ID from env — Phase 2a is the audio-quality
-# probe and we want it to use the SDK's default voice, exactly like the
-# colleague's reference benchmark script. Set LIVEKIT_AGENT_VOICE_ID to
-# pin a specific voice once we move to Phase 2b.
 DEFAULT_VOICE_ID = (
     int(os.environ["LIVEKIT_AGENT_VOICE_ID"])
     if os.environ.get("LIVEKIT_AGENT_VOICE_ID")
-    else None
+    else (
+        int(os.environ["KUGELAUDIO_VOICE_ID"])
+        if os.environ.get("KUGELAUDIO_VOICE_ID")
+        else None
+    )
 )
 # IMPORTANT: the LiveKit plugin's TTSModels Literal only declares
 # "kugel-1" and "kugel-1-turbo". The /ws/tts/multi endpoint that LiveKit
@@ -48,6 +48,7 @@ DEFAULT_VOICE_ID = (
 # the model the plugin actually supports for natural-sounding output.
 # Override via env if Kugel ships kugel-2 multi-stream support later.
 DEFAULT_MODEL = os.environ.get("LIVEKIT_AGENT_MODEL", "kugel-1")
+DEFAULT_LANGUAGE = os.environ.get("LIVEKIT_AGENT_LANGUAGE") or os.environ.get("KUGELAUDIO_LANGUAGE")
 GREETING = os.environ.get(
     "LIVEKIT_GREETING",
     "Guten Tag, hier ist der digitale Versicherungs-Assistent. "
@@ -71,9 +72,18 @@ async def entrypoint(ctx: JobContext):
     }
     if DEFAULT_VOICE_ID is not None:
         tts_kwargs["voice_id"] = DEFAULT_VOICE_ID
+    if DEFAULT_LANGUAGE:
+        tts_kwargs["language"] = DEFAULT_LANGUAGE
     cfg_scale = os.environ.get("KUGELAUDIO_CFG_SCALE")
     if cfg_scale:
         tts_kwargs["cfg_scale"] = float(cfg_scale)
+
+    logger.info(
+        "livekit tts config: model=%s voice_id=%s language=%s",
+        tts_kwargs.get("model"),
+        tts_kwargs.get("voice_id"),
+        tts_kwargs.get("language"),
+    )
 
     tts = KugelAudioTTS(**tts_kwargs)
     # word_timestamps=True (plugin default) forces forced-alignment per
