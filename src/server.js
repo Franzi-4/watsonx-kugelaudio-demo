@@ -34,6 +34,13 @@ function pcmToWav(pcm, sampleRate, channels = 1, bitsPerSample = 16) {
   return Buffer.concat([header, pcm]);
 }
 
+function clipLogValue(value, maxLen = 220) {
+  if (value === null || value === undefined) return String(value);
+  const s = typeof value === 'string' ? value : JSON.stringify(value);
+  if (!s) return '';
+  return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s;
+}
+
 // Load environment variables
 dotenv.config();
 
@@ -54,6 +61,37 @@ const kugelAudioClient = new KugelAudioClient({
   apiUrl: process.env.KUGELAUDIO_API_URL,
   modelId: process.env.KUGELAUDIO_MODEL_ID || 'kugel-2-turbo',
 });
+
+/**
+ * Stream TTS and retry once without voiceId when provider-specific voice
+ * selection fails (e.g. timeout/aborted for one voice profile).
+ */
+async function streamTtsWithVoiceFallback(text, opts) {
+  const requestedVoiceId = (opts.voiceId === undefined || opts.voiceId === null)
+    ? undefined
+    : Number(opts.voiceId);
+  const baseOpts = {
+    language: opts.language,
+    cfgScale: opts.cfgScale,
+    normalize: opts.normalize,
+    onAudio: opts.onAudio,
+  };
+
+  try {
+    await kugelAudioClient.streamFullTextTts(text, {
+      ...baseOpts,
+      voiceId: requestedVoiceId,
+    });
+    return { usedFallback: false, usedVoiceId: requestedVoiceId };
+  } catch (error) {
+    if (requestedVoiceId === undefined) throw error;
+    console.warn(
+      `[${opts.logTag || 'tts'}] stream failed with voiceId=${requestedVoiceId}: ${error.message} — retrying with SDK default voice`,
+    );
+    await kugelAudioClient.streamFullTextTts(text, baseOpts);
+    return { usedFallback: true, usedVoiceId: undefined };
+  }
+}
 
 const watsonxClient = new WatsonxClient({
   apiKey: process.env.WATSONX_API_KEY,
@@ -112,6 +150,10 @@ const voicePipeline = new VoicePipeline({
 
 // Initialize WebSocket server
 const wss = new WebSocketServer({ server: httpServer });
+wss.on('error', (error) => {
+  if (error?.code === 'EADDRINUSE') return;
+  console.error('WebSocket server error:', error);
+});
 
 // ============================================================================
 // REST API ENDPOINTS
@@ -155,6 +197,26 @@ app.get('/api/health', async (req, res) => {
       status: 'error',
       message: error.message,
     });
+  }
+});
+
+/**
+ * Browser debug-log ingest endpoint.
+ * POST /api/client-log { source?, sessionId?, page?, logs: [{ts,args:[]}] }
+ */
+app.post('/api/client-log', (req, res) => {
+  try {
+    const { source = 'web', sessionId = 'unknown', page = '', logs = [] } = req.body || {};
+    const entries = Array.isArray(logs) ? logs : [];
+    for (const entry of entries) {
+      const ts = entry?.ts ? new Date(entry.ts).toISOString() : new Date().toISOString();
+      const args = Array.isArray(entry?.args) ? entry.args : [];
+      const line = args.map((a) => clipLogValue(a)).join(' | ');
+      console.log(`[client-log] [${source}] [${sessionId}] ${ts} ${page} ${line}`);
+    }
+    res.json({ ok: true, ingested: entries.length });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: error.message });
   }
 });
 
@@ -306,6 +368,17 @@ async function prerenderAllGreetings() {
   }
 }
 
+async function ensureTtsSidecarReady(timeoutMs = 12000) {
+  if (await kugelAudioClient.sidecarHealthy()) return true;
+  await startTtsSidecar();
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await kugelAudioClient.sidecarHealthy()) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
 /**
  * Streaming variant of /api/scenario/start.
  * Same outcome (session + greeting + Kugel TTS) but the audio streams in
@@ -323,6 +396,13 @@ app.post('/api/scenario/start/stream', async (req, res) => {
   const { scenarioId, voiceId, sessionId: providedSessionId } = req.body || {};
   const scenario = getScenario(scenarioId);
   const language = scenario.defaultLanguage || 'de';
+
+  if (!(await ensureTtsSidecarReady())) {
+    return res.status(503).json({
+      error: 'tts_unavailable',
+      message: 'TTS sidecar is not reachable',
+    });
+  }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -365,11 +445,12 @@ app.post('/api/scenario/start/stream', async (req, res) => {
       console.log(`[scenario/start/stream] ${sessionId} cache hit (${cached.length} chunks)`);
     } else {
       try {
-        await kugelAudioClient.streamFullTextTts(greeting, {
-          voiceId: voiceId !== undefined ? Number(voiceId) : undefined,
+        const ttsResult = await streamTtsWithVoiceFallback(greeting, {
+          voiceId,
           language: ttsOpts.language,
           cfgScale: ttsOpts.cfgScale,
           normalize: ttsOpts.normalize,
+          logTag: 'scenario/start',
           onAudio: ({ pcm, sampleRate, samples }) => {
             chunkCount++;
             send('audio', {
@@ -381,6 +462,9 @@ app.post('/api/scenario/start/stream', async (req, res) => {
             });
           },
         });
+        if (ttsResult.usedFallback) {
+          console.log(`[scenario/start/stream] ${sessionId} retried with SDK default voice`);
+        }
       } catch (e) {
         console.warn(`[scenario/start] TTS stream failed: ${e.message}`);
         send('error', { message: `tts: ${e.message}` });
@@ -413,6 +497,13 @@ app.post('/api/scenario/start/stream', async (req, res) => {
  */
 app.post('/api/scenario/start', async (req, res) => {
   try {
+    if (!(await ensureTtsSidecarReady())) {
+      return res.status(503).json({
+        error: 'tts_unavailable',
+        message: 'TTS sidecar is not reachable',
+      });
+    }
+
     const { scenarioId, voiceId, sessionId: providedSessionId } = req.body || {};
     const scenario = getScenario(scenarioId);
 
@@ -473,6 +564,13 @@ app.post('/api/scenario/start', async (req, res) => {
  */
 app.post('/api/tts', async (req, res) => {
   try {
+    if (!(await ensureTtsSidecarReady())) {
+      return res.status(503).json({
+        error: 'tts_unavailable',
+        message: 'TTS sidecar is not reachable',
+      });
+    }
+
     const { text, voiceId, language } = req.body || {};
     if (!text || typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'text is required' });
@@ -493,6 +591,13 @@ app.post('/api/tts', async (req, res) => {
 
 app.post('/api/converse', async (req, res) => {
   try {
+    if (!(await ensureTtsSidecarReady())) {
+      return res.status(503).json({
+        error: 'tts_unavailable',
+        message: 'TTS sidecar is not reachable',
+      });
+    }
+
     const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
     if (!text || typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'text is required' });
@@ -550,6 +655,13 @@ app.post('/api/converse/stream', async (req, res) => {
   const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
   if (!text || typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ error: 'text is required' });
+  }
+
+  if (!(await ensureTtsSidecarReady())) {
+    return res.status(503).json({
+      error: 'tts_unavailable',
+      message: 'TTS sidecar is not reachable',
+    });
   }
 
   const scenario = getScenario(scenarioId);
@@ -659,14 +771,12 @@ app.post('/api/converse/stream', async (req, res) => {
       return;
     }
     try {
-      await kugelAudioClient.streamFullTextTts(spokenText, {
-        // Per-request voiceId: undefined → SDK default voice (matches the
-        // reference benchmark script). Whatever the UI didn't send, we
-        // don't synthesise.
-        voiceId: voiceId !== undefined ? Number(voiceId) : undefined,
+      const ttsResult = await streamTtsWithVoiceFallback(spokenText, {
+        voiceId,
         language: ttsOpts.language,
         cfgScale: ttsOpts.cfgScale,
         normalize: ttsOpts.normalize,
+        logTag: 'converse/stream',
         onAudio: ({ pcm, sampleRate, samples }) => {
           if (firstAudioAt === null) firstAudioAt = Date.now() - ttsStartedAt;
           send('audio', {
@@ -678,6 +788,9 @@ app.post('/api/converse/stream', async (req, res) => {
           });
         },
       });
+      if (ttsResult.usedFallback) {
+        console.log(`[converse/stream] ${sessionId} retried with SDK default voice`);
+      }
     } catch (e) {
       console.warn(`TTS sidecar stream failed: ${e.message}`);
       send('error', { message: `tts: ${e.message}` });
@@ -887,12 +1000,22 @@ app.use((error, req, res, next) => {
 // ============================================================================
 
 const PORT = process.env.PORT || 3000;
+const HOST = '0.0.0.0';
+let shuttingDown = false;
+let ttsSidecarChild = null;
+let livekitAgentChild = null;
+process.once('SIGINT', () => { shuttingDown = true; });
+process.once('SIGTERM', () => { shuttingDown = true; });
 
 // Spawn the Python TTS sidecar as a child process so the dev experience is
 // `node src/server.js` and you get a working voice demo. The sidecar owns
 // the persistent KugelAudio SDK client (warm-up, connection reuse) — i.e.
 // the colleague's reference pattern, run by Python, not reimplemented here.
 async function startTtsSidecar() {
+  if (ttsSidecarChild && ttsSidecarChild.exitCode === null) {
+    return ttsSidecarChild;
+  }
+
   // node --watch restarts spawn a new server but the previous sidecar may
   // still be alive (it's our child but signal delivery races the new boot).
   // Skip the spawn if the port is already serving — the existing sidecar
@@ -925,11 +1048,23 @@ async function startTtsSidecar() {
     // sidecar before its warm-up completes. We still kill on clean exit.
     detached: false,
   });
+  ttsSidecarChild = child;
 
   const tag = (line) => `[tts sidecar] ${line}`;
   child.stdout.on('data', (b) => b.toString().split(/\r?\n/).filter(Boolean).forEach((l) => console.log(tag(l))));
   child.stderr.on('data', (b) => b.toString().split(/\r?\n/).filter(Boolean).forEach((l) => console.warn(tag(l))));
-  child.on('exit', (code) => console.warn(`[tts sidecar] exited (code ${code})`));
+  child.on('exit', (code, signal) => {
+    console.warn(`[tts sidecar] exited (code ${code}, signal ${signal})`);
+    if (ttsSidecarChild === child) ttsSidecarChild = null;
+    // Keep sidecar available during long demos even if the process drops.
+    if (!shuttingDown) {
+      setTimeout(() => {
+        startTtsSidecar().catch((e) => {
+          console.warn(`[tts sidecar] auto-restart failed: ${e.message}`);
+        });
+      }, 1500);
+    }
+  });
 
   const stop = () => { try { child.kill('SIGTERM'); } catch {} };
   process.once('SIGINT', stop);
@@ -942,10 +1077,6 @@ async function startTtsSidecar() {
 // the agent is a long-running worker that connects out to LiveKit Cloud,
 // not a local HTTP server. Idempotency is just "did we already spawn one
 // in this process".
-let livekitAgentChild = null;
-let shuttingDown = false;
-process.once('SIGINT', () => { shuttingDown = true; });
-process.once('SIGTERM', () => { shuttingDown = true; });
 function startLivekitAgent() {
   if (livekitAgentChild && livekitAgentChild.exitCode === null) {
     console.log('[livekit agent] already running');
@@ -986,7 +1117,16 @@ function startLivekitAgent() {
   return child;
 }
 
-httpServer.listen(PORT, () => {
+httpServer.on('error', (error) => {
+  if (error?.code === 'EADDRINUSE') {
+    console.warn(`[boot] port ${PORT} already in use. Another server instance is likely running.`);
+    console.warn(`[boot] re-use existing instance on http://localhost:${PORT} or stop stale node --watch processes first.`);
+    return;
+  }
+  throw error;
+});
+
+httpServer.listen(PORT, HOST, () => {
   console.log('[boot] greeting-cache build active');
   startTtsSidecar();
   startLivekitAgent();

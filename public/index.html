@@ -251,50 +251,6 @@
   }
   .suggestion-chip:hover { color: var(--fg); border-color: var(--border-2); }
 
-  /* ─── voice chips ────────────────────────────────────── */
-  .voice-bar {
-    padding: 10px 16px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    gap: 5px;
-    overflow-x: auto;
-    flex-shrink: 0;
-    align-items: center;
-  }
-  .voice-label {
-    font-family: var(--mono);
-    font-size: 10px;
-    color: var(--fg-3);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-right: 6px;
-  }
-  .voice-chip {
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    background: transparent;
-    border-radius: 999px;
-    font-size: 11px;
-    color: var(--fg-2);
-    cursor: pointer;
-    font-family: inherit;
-    white-space: nowrap;
-    transition: all 80ms;
-  }
-  .voice-chip:hover { color: var(--fg); border-color: var(--border-2); }
-  .voice-chip.active {
-    background: var(--fg);
-    color: var(--bg);
-    border-color: var(--fg);
-  }
-  .voice-chip .lang {
-    color: var(--fg-4);
-    margin-left: 5px;
-    font-family: var(--mono);
-    font-size: 10px;
-  }
-  .voice-chip.active .lang { color: var(--bg); opacity: 0.45; }
-
   /* ─── thread ─────────────────────────────────────────── */
   main {
     flex: 1;
@@ -675,7 +631,7 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 24px;
+    gap: 18px;
     padding: 40px;
   }
   #liveOverlay.active { display: flex; }
@@ -731,28 +687,6 @@
     50%      { transform: scale(1.08); opacity: 0.15; }
   }
 
-  .live-meter {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-family: var(--mono);
-    font-size: 10px;
-    color: var(--fg-3);
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-  }
-  .live-meter .bar {
-    width: 80px; height: 4px;
-    background: var(--bg-2);
-    border-radius: 2px;
-    overflow: hidden;
-  }
-  .live-meter .fill {
-    height: 100%;
-    width: calc(var(--mic-level, 0) * 100%);
-    background: linear-gradient(90deg, #10a86e, #10a86e 70%, #f59e0b);
-    transition: width 60ms linear;
-  }
   .live-warn {
     font-family: var(--mono);
     font-size: 11px;
@@ -879,7 +813,6 @@
   <span class="stack-item" id="s-kugel"><span class="d"></span>KugelAudio</span>
 </div>
 
-
 <main id="main">
   <div class="thread" id="thread">
     <div class="empty-state" id="emptyState">
@@ -924,6 +857,10 @@
 
 <div id="liveOverlay">
   <div id="liveOrb" class="live-orb">
+    <canvas id="orbWave" width="400" height="400"></canvas>
+    <div class="orb-ring orb-ring-1"></div>
+    <div class="orb-ring orb-ring-2"></div>
+    <div class="orb-ring orb-ring-3"></div>
     <div class="orb-inner" id="orbState">idle</div>
   </div>
   <div id="liveTranscript" class="live-transcript empty">Sprich einfach los …</div>
@@ -942,7 +879,6 @@
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
   const statusText = $('statusText');
-  const voiceRow = $('voiceRow');
   const thread = $('thread');
   const emptyState = $('emptyState');
   const input = $('input');
@@ -953,30 +889,53 @@
   const errorBanner = $('errorBanner');
   const main = $('main');
 
-  // Default to a specific voice so consecutive requests stay on the same
-  // speaker. The "Zufall"-chip (voice_id null) lets the server pick a
-  // random voice each request — useful for testing, useless for a demo.
-  let selectedVoiceId = 977;
+  // Single fixed demo voice (multi-voice selection removed).
+  const selectedVoiceId = 977;
+  const selectedSpeechLang = 'de-DE';
   let sessionId = null;
   let sending = false;
   let scenarios = [];
   let selectedScenarioId = null;
-
-  const voices = [
-    { id: 977, name: 'Dominik', lang: 'DE' },
-    { id: 978, name: 'Lea', lang: 'DE' },
-    { id: 980, name: 'Marius', lang: 'DE' },
-    { id: 979, name: 'Sara', lang: 'DE' },
-    { id: 1018, name: 'Emma', lang: 'EN' },
-    { id: 1009, name: 'Geronimo', lang: 'EN' },
-    { id: 285, name: 'Angela', lang: 'EN' },
-    { id: 289, name: 'Lukas', lang: 'EN' },
-    { id: 911, name: 'Lars', lang: 'NL' },
-    { id: 912, name: 'Rosa', lang: 'NL' },
-    { id: 744, name: 'Dawid', lang: 'PL' },
-    { id: 849, name: 'Ana', lang: 'SL' },
-    { id: null, name: 'Zufall', lang: '?' },
-  ];
+  const VOICE_DEBUG = new URLSearchParams(window.location.search).get('voiceDebug') === '1'
+    || localStorage.getItem('voiceDebug') === '1';
+  const debugLogQueue = [];
+  let debugFlushTimer = null;
+  function queueDebugLog(args) {
+    if (!VOICE_DEBUG) return;
+    const safeArgs = args.map((a) => {
+      if (a === null || a === undefined) return a;
+      if (typeof a === 'string' || typeof a === 'number' || typeof a === 'boolean') return a;
+      try { return JSON.parse(JSON.stringify(a)); } catch { return String(a); }
+    });
+    debugLogQueue.push({ ts: Date.now(), args: safeArgs });
+    if (debugLogQueue.length > 600) debugLogQueue.splice(0, debugLogQueue.length - 600);
+    if (debugFlushTimer) return;
+    debugFlushTimer = setTimeout(flushDebugLogs, 450);
+  }
+  function flushDebugLogs() {
+    debugFlushTimer = null;
+    if (!VOICE_DEBUG || !debugLogQueue.length) return;
+    const batch = debugLogQueue.splice(0, Math.min(debugLogQueue.length, 80));
+    fetch('/api/client-log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      keepalive: true,
+      body: JSON.stringify({
+        source: 'voice-ui',
+        sessionId,
+        page: location.pathname,
+        logs: batch,
+      }),
+    }).catch(() => {});
+    if (debugLogQueue.length && !debugFlushTimer) {
+      debugFlushTimer = setTimeout(flushDebugLogs, 450);
+    }
+  }
+  const dbg = (...args) => {
+    if (!VOICE_DEBUG) return;
+    console.log('[voice-debug]', ...args);
+    queueDebugLog(args);
+  };
 
   const scenarioToggle = $('scenarioToggle');
   const emptyTitle = $('emptyTitle');
@@ -1036,7 +995,7 @@
 
     try {
       const startBody = { scenarioId: s.id, sessionId };
-      if (selectedVoiceId !== null) startBody.voiceId = selectedVoiceId;
+      if (selectedVoiceId !== null && selectedVoiceId !== undefined) startBody.voiceId = selectedVoiceId;
       // Streaming greeting — first audio chunk lands in ~500ms instead of
       // ~1-3s, because we no longer block on the full TTS synthesis.
       if (audioCtx && audioCtx.state === 'suspended') {
@@ -1091,18 +1050,37 @@
             if (audioCtx?.state === 'suspended') {
               try { await audioCtx.resume(); } catch {}
             }
-            enqueuePcmChunk(payload.pcm, payload.sampleRate);
+            await enqueuePcmChunk(payload.pcm, payload.sampleRate);
           } else if (event === 'error') {
             throw new Error(payload.message || 'stream error');
           }
         }
       }
       console.log(`[greeting] received ${chunkCount} audio chunks`);
+      if (chunkCount === 0) throw new Error('stream greeting had zero audio chunks');
+      if (audioCtx?.state === 'suspended') {
+        try { await audioCtx.resume(); } catch {}
+      }
       await pcmStreamFinished();
       if (liveActive) startLiveListening();
     } catch (e) {
-      showError(`Konnte Gespräch nicht starten: ${e.message}`);
-      liveStop();
+      try {
+        showError('Streaming-Start fehlgeschlagen, nutze Fallback …');
+        const d = await fetchScenarioStartFallback(s.id);
+        sessionId = d.sessionId;
+        thread.innerHTML = '';
+        addMessage({
+          role: 'assistant',
+          text: d.greeting || '',
+          meta: `${d.scenarioLabel || s.label} · Kugel Audio (fallback)`,
+        });
+        setOrbState('speaking');
+        await playBase64Wav(d.audio);
+        if (liveActive) startLiveListening();
+      } catch (fallbackErr) {
+        showError(`Konnte Gespräch nicht starten: ${fallbackErr.message || e.message}`);
+        liveStop();
+      }
     }
   }
 
@@ -1167,17 +1145,6 @@
     else applyScenarioEmptyState();
   }
 
-  function renderVoices() {
-    voiceRow.innerHTML = '';
-    voices.forEach(v => {
-      const b = document.createElement('button');
-      b.className = 'voice-chip' + (v.id === selectedVoiceId ? ' active' : '');
-      b.innerHTML = `${v.name}<span class="lang">${v.lang}</span>`;
-      b.onclick = () => { selectedVoiceId = v.id; renderVoices(); };
-      voiceRow.appendChild(b);
-    });
-  }
-
   function scrollToBottom() {
     requestAnimationFrame(() => { main.scrollTop = main.scrollHeight; });
   }
@@ -1232,7 +1199,7 @@
       }
       const svc = d.services || {};
       const flip = (id, ok) => $(id).classList.toggle('ok', ok);
-      flip('s-orch', svc.watsonx_orchestrate === 'provisioned');
+      flip('s-orch', svc.watsonx_orchestrate === 'up' || svc.watsonx_orchestrate === 'provisioned');
       flip('s-wx', svc.watsonx_ai === 'up');
       flip('s-gov', svc.watsonx_governance === 'provisioned');
       flip('s-kugel', svc.kugelaudio === 'up');
@@ -1248,6 +1215,36 @@
     setTimeout(() => errorBanner.classList.add('hidden'), 6000);
   }
 
+  async function fetchScenarioStartFallback(scenarioId) {
+    const body = { scenarioId, sessionId };
+    if (selectedVoiceId !== null && selectedVoiceId !== undefined) body.voiceId = selectedVoiceId;
+    const r = await fetch('/api/scenario/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.message || `HTTP ${r.status}`);
+    }
+    return r.json();
+  }
+
+  async function fetchConverseFallback(text) {
+    const body = { text, sessionId, scenarioId: selectedScenarioId };
+    if (selectedVoiceId !== null && selectedVoiceId !== undefined) body.voiceId = selectedVoiceId;
+    const r = await fetch('/api/converse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.message || `HTTP ${r.status}`);
+    }
+    return r.json();
+  }
+
   async function send() {
     const text = input.value.trim();
     if (!text || sending) return;
@@ -1260,7 +1257,7 @@
 
     try {
       const convBody = { text, sessionId, scenarioId: selectedScenarioId };
-      if (selectedVoiceId !== null) convBody.voiceId = selectedVoiceId;
+      if (selectedVoiceId !== null && selectedVoiceId !== undefined) convBody.voiceId = selectedVoiceId;
       const r = await fetch('/api/converse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1391,6 +1388,12 @@
   let pcmDoneResolve = null;   // resolves when the last scheduled source ends
 
   function resetPcmStream() {
+    dbg('pcm reset', {
+      activeSources: pcmActiveSources.size,
+      pendingBuffers: pcmPending.length,
+      started: pcmStarted,
+      cursor: Number(pcmCursor.toFixed(3)),
+    });
     // Cancel any pending "all done" promise so the previous turn's
     // pcmStreamFinished doesn't block if resetPcmStream is called early.
     if (pcmDoneResolve) { const r = pcmDoneResolve; pcmDoneResolve = null; r(); }
@@ -1407,11 +1410,18 @@
     src.connect(audioCtx.destination);
     const safeNow = audioCtx.currentTime + 0.005; // 5ms scheduling safety
     const startAt = Math.max(pcmCursor, safeNow);
+    dbg('pcm schedule', {
+      durationMs: Math.round(buffer.duration * 1000),
+      startAt: Number(startAt.toFixed(3)),
+      safeNow: Number(safeNow.toFixed(3)),
+      activeBeforeStart: pcmActiveSources.size,
+    });
     src.start(startAt);
     pcmCursor = startAt + buffer.duration;
     pcmActiveSources.add(src);
     src.onended = () => {
       pcmActiveSources.delete(src);
+      dbg('pcm ended', { activeRemaining: pcmActiveSources.size });
       // Notify pcmStreamFinished when the last source finishes.
       if (pcmActiveSources.size === 0 && pcmDoneResolve) {
         const r = pcmDoneResolve;
@@ -1441,10 +1451,20 @@
       try { await audioCtx.resume(); } catch {}
     }
     const buffer = _decodePcm(b64, sampleRate);
+    dbg('pcm chunk', {
+      sampleRate,
+      durationMs: Math.round(buffer.duration * 1000),
+      started: pcmStarted,
+      pendingBuffers: pcmPending.length,
+    });
 
     if (!pcmStarted) {
       pcmPending.push(buffer);
       const buffered = pcmPending.reduce((s, b) => s + b.duration, 0);
+      dbg('pcm jitter buffer', {
+        bufferedMs: Math.round(buffered * 1000),
+        thresholdMs: PCM_JITTER_MS,
+      });
       if (buffered * 1000 < PCM_JITTER_MS) return;
       // Anchor the cursor a hair into the future so the first scheduled
       // start time is reachable, then drain the pre-buffer back-to-back.
@@ -1462,6 +1482,13 @@
   // correctly even when AudioContext was suspended mid-stream. Falls back to a
   // wall-clock timeout in case onended never fires (e.g. context stays suspended).
   function pcmStreamFinished() {
+    dbg('pcmStreamFinished enter', {
+      started: pcmStarted,
+      pendingBuffers: pcmPending.length,
+      activeSources: pcmActiveSources.size,
+      cursor: Number(pcmCursor.toFixed(3)),
+      ctxNow: audioCtx ? Number(audioCtx.currentTime.toFixed(3)) : null,
+    });
     if (!audioCtx) return Promise.resolve();
     // Flush any chunks that never crossed the jitter threshold (short response).
     if (!pcmStarted && pcmPending.length) {
@@ -1480,6 +1507,7 @@
       // Safety timeout: if onended never fires (suspended context that never
       // resumes), give up after the estimated remaining time + 2 s.
       const remaining = Math.max(0, pcmCursor - audioCtx.currentTime);
+      dbg('pcmStreamFinished wait', { remainingMs: Math.round(remaining * 1000) });
       setTimeout(() => {
         if (pcmDoneResolve) { pcmDoneResolve = null; resolve(); }
       }, remaining * 1000 + 2000);
@@ -1601,7 +1629,10 @@
     liveWarn.classList.add('hidden');
   }
 
-  async function liveStart() {
+  let lkRoom = null;
+  const lkAudioEls = [];
+
+  async function liveStartSse() {
     const ok = await ensureLiveReady();
     if (!ok) return;
     liveActive = true;
@@ -1613,6 +1644,12 @@
     startLiveListening();
   }
 
+  async function liveStart() {
+    // Default path for demos: full conversational loop (STT -> LLM -> TTS) via SSE.
+    // LiveKit stays available through the dedicated "LiveKit-Audio-Test" button.
+    await liveStartSse();
+  }
+
   function liveStop() {
     liveActive = false;
     clearLiveSilenceTimer();
@@ -1621,21 +1658,29 @@
     if (currentSource) { try { currentSource.stop(); } catch {} currentSource = null; }
     resetPcmStream();
     if (liveAudio) { liveAudio.pause(); liveAudio.src = ''; liveAudio = null; }
+    if (lkRoom) {
+      try { lkRoom.disconnect(); } catch {}
+      lkRoom = null;
+    }
+    for (const el of lkAudioEls) {
+      try { el.remove(); } catch {}
+    }
+    lkAudioEls.length = 0;
     liveOverlay.classList.remove('active');
     hideLiveWarn();
     setOrbState('idle');
+    goLiveBtn.textContent = 'Start live conversation';
+    goLiveBtn.disabled = false;
   }
 
   function startLiveListening() {
     if (!liveActive) return;
+    dbg('live listening start');
     setOrbState('listening');
-    const v = voices.find(x => x.id === selectedVoiceId);
-    const lang = ({ DE: 'de-DE', EN: 'en-US', NL: 'nl-NL', PL: 'pl-PL', SL: 'sl-SI' })[v?.lang] || 'de-DE';
-
     liveRecog = new SRctor();
     liveRecog.continuous = true;
     liveRecog.interimResults = true;
-    liveRecog.lang = lang;
+    liveRecog.lang = selectedSpeechLang;
 
     liveBuffer = '';
     hideLiveWarn();
@@ -1705,10 +1750,12 @@
       clearLiveSilenceTimer();
       clearWatchdog();
       if (!liveActive) return;
+      dbg('live recognition end', { bufferedTextLength: liveBuffer.trim().length });
       if (liveBuffer.trim().length > 1) {
         await liveSubmit(liveBuffer.trim());
       } else {
         // nothing captured — restart listening
+        dbg('live recognition restart: no text');
         startLiveListening();
       }
     };
@@ -1720,6 +1767,12 @@
 
   async function liveSubmit(text) {
     if (!liveActive) return;
+    dbg('live submit start', {
+      textLength: text.length,
+      sessionId,
+      scenarioId: selectedScenarioId,
+      voiceId: selectedVoiceId,
+    });
     // Chrome suspends AudioContext while Web Speech holds the mic. Resume it
     // NOW — before the TTS stream starts — so every enqueuePcmChunk call hits
     // a running context synchronously. Without this, pcmStreamFinished() reads
@@ -1746,7 +1799,7 @@
 
     try {
       const reqBody = { text, sessionId, scenarioId: selectedScenarioId };
-      if (selectedVoiceId !== null) reqBody.voiceId = selectedVoiceId;
+      if (selectedVoiceId !== null && selectedVoiceId !== undefined) reqBody.voiceId = selectedVoiceId;
       const r = await fetch('/api/converse/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1779,6 +1832,7 @@
 
           if (event === 'session') {
             sessionId = payload.sessionId;
+            dbg('sse session', { sessionId });
           } else if (event === 'delta') {
             fullTextSoFar += payload.text;
             liveTranscript.textContent = fullTextSoFar;
@@ -1794,13 +1848,20 @@
             if (audioCtx?.state === 'suspended') {
               try { await audioCtx.resume(); } catch {}
             }
-            enqueuePcmChunk(payload.pcm, payload.sampleRate);
+            await enqueuePcmChunk(payload.pcm, payload.sampleRate);
+            dbg('sse audio', { chunk: audioChunkCount, sampleRate: payload.sampleRate });
           } else if (event === 'done') {
             fullTextSoFar = payload.responseText || fullTextSoFar;
             const llm = payload.llmMs != null ? ` · LLM <b>${payload.llmMs}ms</b>` : '';
             const ttfa = payload.ttsTtfa != null ? ` · TTS-TTFA <b>${payload.ttsTtfa}ms</b>` : '';
             finalMeta = `llama-3-3-70b → kugel-2 · <b>${payload.processingTime}ms</b>${llm}${ttfa}`;
             streamDone = true;
+            dbg('sse done', {
+              processingTime: payload.processingTime,
+              llmMs: payload.llmMs,
+              ttsTtfa: payload.ttsTtfa,
+              responseTextLength: (payload.responseText || '').length,
+            });
           } else if (event === 'error') {
             throw new Error(payload.message || 'stream error');
           }
@@ -1808,36 +1869,51 @@
       }
       // Wait for the queued PCM to finish playing before listening again,
       // otherwise the agent would talk over itself.
+      if (audioCtx?.state === 'suspended') {
+        try { await audioCtx.resume(); } catch {}
+      }
       await pcmStreamFinished();
+      dbg('playback finished', { audioChunkCount, streamDone });
       pending.remove();
       console.log(`[turn] audioChunks=${audioChunkCount}`);
       if (audioChunkCount === 0) {
-        // No audio came through — the sidecar or LLM dropped the turn.
-        // Surface it instead of silently jumping back to listening, which is
-        // the symptom the user has been seeing as "doesn't read aloud".
-        showError('Keine Audio-Antwort vom TTS — bitte erneut versuchen oder Sidecar prüfen.');
-        addMessage({
-          role: 'assistant',
-          text: fullTextSoFar.trim() || '(keine Antwort)',
-          meta: 'TTS lieferte keine Audio-Chunks',
-        });
-      } else {
-        addMessage({
-          role: 'assistant',
-          text: fullTextSoFar.trim(),
-          meta: finalMeta || `llama-3-3-70b · streamed`,
-        });
+        throw new Error('stream delivered zero audio chunks');
       }
-      if (liveActive) startLiveListening();
+      addMessage({
+        role: 'assistant',
+        text: fullTextSoFar.trim(),
+        meta: finalMeta || `llama-3-3-70b · streamed`,
+      });
+      if (liveActive) {
+        dbg('restart listening after playback');
+        startLiveListening();
+      }
     } catch (e) {
       pending.remove();
-      showError(e.message);
-      if (liveActive) setTimeout(() => startLiveListening(), 800);
+      dbg('live submit stream error', e.message);
+      try {
+        showError('Streaming-TTS fehlgeschlagen, nutze Fallback …');
+        const d = await fetchConverseFallback(text);
+        sessionId = d.sessionId;
+        addMessage({
+          role: 'assistant',
+          text: d.responseText || '',
+          meta: `llama-3-3-70b → kugel-2 · <b>${d.processingTime}ms</b> · fallback`,
+        });
+        if (audioCtx?.state === 'suspended') {
+          try { await audioCtx.resume(); } catch {}
+        }
+        await playBase64Wav(d.audio);
+      } catch (fallbackErr) {
+        showError(fallbackErr.message || e.message);
+        dbg('live submit fallback error', fallbackErr.message || String(fallbackErr));
+      }
+      if (liveActive) setTimeout(() => startLiveListening(), 300);
     }
   }
 
   goLiveBtn?.addEventListener('click', liveStart);
-  heroStartBtn?.addEventListener('click', startScenarioConversation);
+  heroStartBtn?.addEventListener('click', liveStart);
   liveStopBtn?.addEventListener('click', liveStop);
 
   // ─── Phase 2a: LiveKit audio-quality probe ───────────────────
@@ -1847,7 +1923,6 @@
   // through <audio> — no PCM scheduling, no per-chunk resampling.
   // If this sounds clearly cleaner than our SSE flow, Phase 2b is worth it.
   const lkProbeBtn = $('lkProbeBtn');
-  let lkRoom = null;
   async function lkProbe() {
     if (!window.LivekitClient) {
       showError('LiveKit JS SDK nicht geladen — Reload?');
@@ -1970,8 +2045,7 @@
       recog.continuous = false;
       recog.interimResults = true;
       recog.maxAlternatives = 1;
-      const v = voices.find(v => v.id === selectedVoiceId);
-      recog.lang = ({ DE: 'de-DE', EN: 'en-US', NL: 'nl-NL', PL: 'pl-PL', SL: 'sl-SI' })[v?.lang] || 'en-US';
+      recog.lang = selectedSpeechLang;
 
       recog.onstart = () => {
         listening = true;

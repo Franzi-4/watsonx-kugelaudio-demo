@@ -2,6 +2,7 @@ import KugelAudioClient from './kugelaudio-client.js';
 import WatsonxClient from './watsonx-client.js';
 import { classifyIntent, generateResponse, buildAgentContext } from './agents/customer-service-agent.js';
 import { getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
+import { cleanLlmText } from './agents/text-cleanup.js';
 
 /**
  * Voice Pipeline Manager
@@ -149,7 +150,9 @@ class VoicePipeline {
       session.context.escalation.reason = intentResult.intent;
     }
 
-    const tts = await this.kugelAudioClient.textToSpeech(responseText, {
+    const cleanedResponseText = cleanLlmText(responseText, { language: activeLanguage });
+
+    const tts = await this.kugelAudioClient.textToSpeech(cleanedResponseText, {
       ...this.ttsOptions(activeLanguage),
       voiceId,  // per-request override; undefined → SDK default voice
     });
@@ -157,12 +160,12 @@ class VoicePipeline {
     session.messageCount++;
     session.context.conversation.messages.push(
       { role: 'user', text: userText, timestamp: new Date().toISOString() },
-      { role: 'assistant', text: responseText, timestamp: new Date().toISOString() },
+      { role: 'assistant', text: cleanedResponseText, timestamp: new Date().toISOString() },
     );
 
     return {
       userText,
-      responseText,
+      responseText: cleanedResponseText,
       language: activeLanguage,
       audio: tts.audio,
       sampleRate: tts.sampleRate,
