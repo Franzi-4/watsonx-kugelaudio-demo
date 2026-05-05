@@ -1361,8 +1361,12 @@
   let pcmPending = [];                // pre-jitter buffer (AudioBuffers waiting to start)
   let pcmStarted = false;
   const pcmActiveSources = new Set();
+  let pcmDoneResolve = null;   // resolves when the last scheduled source ends
 
   function resetPcmStream() {
+    // Cancel any pending "all done" promise so the previous turn's
+    // pcmStreamFinished doesn't block if resetPcmStream is called early.
+    if (pcmDoneResolve) { const r = pcmDoneResolve; pcmDoneResolve = null; r(); }
     for (const s of pcmActiveSources) { try { s.stop(); } catch {} }
     pcmActiveSources.clear();
     pcmPending = [];
@@ -1379,7 +1383,15 @@
     src.start(startAt);
     pcmCursor = startAt + buffer.duration;
     pcmActiveSources.add(src);
-    src.onended = () => pcmActiveSources.delete(src);
+    src.onended = () => {
+      pcmActiveSources.delete(src);
+      // Notify pcmStreamFinished when the last source finishes.
+      if (pcmActiveSources.size === 0 && pcmDoneResolve) {
+        const r = pcmDoneResolve;
+        pcmDoneResolve = null;
+        r();
+      }
+    };
   }
 
   function _decodePcm(b64, sampleRate) {
@@ -1392,9 +1404,13 @@
     return buffer;
   }
 
+  // enqueuePcmChunk assumes the AudioContext is already running (caller's
+  // responsibility). The async resume inside is a defensive fallback only.
   async function enqueuePcmChunk(b64, sampleRate) {
     if (!audioCtx) return;
     if (audioCtx.state === 'suspended') {
+      // Should not happen — the SSE audio handler resumes before calling us.
+      console.warn('[pcm] AudioContext still suspended in enqueuePcmChunk');
       try { await audioCtx.resume(); } catch {}
     }
     const buffer = _decodePcm(b64, sampleRate);
@@ -1414,17 +1430,33 @@
     }
   }
 
+  // Wait for all scheduled PCM sources to finish playing.
+  // Uses onended events (event-based) rather than a timing estimate so it works
+  // correctly even when AudioContext was suspended mid-stream. Falls back to a
+  // wall-clock timeout in case onended never fires (e.g. context stays suspended).
   function pcmStreamFinished() {
     if (!audioCtx) return Promise.resolve();
-    // If we never crossed the jitter threshold (very short response), drain now.
+    // Flush any chunks that never crossed the jitter threshold (short response).
     if (!pcmStarted && pcmPending.length) {
       pcmCursor = audioCtx.currentTime + 0.02;
       for (const buf of pcmPending) _scheduleAudioBuffer(buf);
       pcmPending = [];
       pcmStarted = true;
     }
-    const remaining = Math.max(0, pcmCursor - audioCtx.currentTime);
-    return new Promise((r) => setTimeout(r, remaining * 1000 + 40));
+    // Nothing was ever scheduled — return immediately.
+    if (!pcmStarted) return Promise.resolve();
+    // All sources already ended before we got here — return immediately.
+    if (pcmActiveSources.size === 0) return Promise.resolve();
+    // Otherwise wait for the last source's onended callback.
+    return new Promise((resolve) => {
+      pcmDoneResolve = resolve;
+      // Safety timeout: if onended never fires (suspended context that never
+      // resumes), give up after the estimated remaining time + 2 s.
+      const remaining = Math.max(0, pcmCursor - audioCtx.currentTime);
+      setTimeout(() => {
+        if (pcmDoneResolve) { pcmDoneResolve = null; resolve(); }
+      }, remaining * 1000 + 2000);
+    });
   }
 
   function setOrbState(s) {
@@ -1724,8 +1756,15 @@
             liveTranscript.textContent = fullTextSoFar;
           } else if (event === 'audio') {
             if (!speakingStarted) { speakingStarted = true; setOrbState('speaking'); }
-            // Fire-and-forget so the SSE reader keeps draining while
-            // playback proceeds on the audio clock in the background.
+            // Ensure AudioContext is running before scheduling this chunk.
+            // Chrome can re-suspend the context during any prior await
+            // (fetch, reader.read), so we check on every chunk, not just
+            // at the top of liveSubmit. This guarantees enqueuePcmChunk
+            // runs synchronously (no internal await), keeping pcmCursor
+            // accurate when pcmStreamFinished is called after the loop.
+            if (audioCtx?.state === 'suspended') {
+              try { await audioCtx.resume(); } catch {}
+            }
             enqueuePcmChunk(payload.pcm, payload.sampleRate);
           } else if (event === 'done') {
             fullTextSoFar = payload.responseText || fullTextSoFar;
