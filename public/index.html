@@ -1666,6 +1666,14 @@
 
   async function liveSubmit(text) {
     if (!liveActive) return;
+    // Chrome suspends AudioContext while Web Speech holds the mic. Resume it
+    // NOW — before the TTS stream starts — so every enqueuePcmChunk call hits
+    // a running context synchronously. Without this, pcmStreamFinished() reads
+    // pcmCursor=0 and returns immediately on turn 2, handing the mic back
+    // before any audio has been scheduled.
+    if (audioCtx && audioCtx.state === 'suspended') {
+      try { await audioCtx.resume(); } catch (e) { console.warn('audioCtx resume failed', e); }
+    }
     setOrbState('thinking');
     liveTranscript.className = 'live-transcript';
     liveTranscript.textContent = text;
