@@ -28,7 +28,6 @@ export const scenarios = {
     shortLabel: 'Schadensmeldung',
     description:
       'Der Agent nimmt eine KFZ-, Hausrat- oder Haftpflicht-Schadensmeldung auf, extrahiert Schadensart, Ort, Zeit, Beteiligte, Schadenshöhe und Policennummer — und liest die Daten zur Bestätigung strukturiert zurück.',
-    idealFor: 'HDI, Debeka, Signal Iduna — Number-Readback ist das Showcase.',
     defaultLanguage: 'de',
     greeting:
       'Guten Tag, hier ist der Schadensmelde-Assistent. Ich nehme Ihren Schadensfall auf. Sagen Sie mir zuerst, um welche Art von Schaden es sich handelt und wann er passiert ist.',
