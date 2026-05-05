@@ -268,6 +268,142 @@ app.get('/api/voices', async (req, res) => {
   }
 });
 
+// Pre-rendered greeting audio cache for instant playback on "Gespräch starten".
+const greetingCache = new Map();
+
+async function prerenderGreeting(scenarioId) {
+  const scenario = getScenario(scenarioId);
+  if (!scenario?.greeting) return;
+  const ttsOpts = voicePipeline.ttsOptions(scenario.defaultLanguage || 'de');
+  const chunks = [];
+  const t0 = Date.now();
+  try {
+    await kugelAudioClient.streamFullTextTts(scenario.greeting, {
+      language: ttsOpts.language,
+      cfgScale: ttsOpts.cfgScale,
+      normalize: ttsOpts.normalize,
+      onAudio: ({ pcm, sampleRate, samples }) => {
+        chunks.push({
+          pcm: pcm.toString('base64'),
+          sampleRate,
+          samples,
+          encoding: 'pcm_s16le',
+        });
+      },
+    });
+    greetingCache.set(scenario.id, chunks);
+    console.log(`[greeting cache] ${scenario.id}: ${chunks.length} chunks (${Date.now() - t0}ms)`);
+  } catch (e) {
+    console.warn(`[greeting cache] ${scenario.id} failed: ${e.message}`);
+  }
+}
+
+async function prerenderAllGreetings() {
+  const ids = listScenarios().map((s) => s.id);
+  console.log(`[greeting cache] prerendering ${ids.length} scenarios: ${ids.join(', ')}`);
+  for (const id of ids) {
+    await prerenderGreeting(id);
+  }
+}
+
+/**
+ * Streaming variant of /api/scenario/start.
+ * Same outcome (session + greeting + Kugel TTS) but the audio streams in
+ * chunks via SSE so the user hears the first syllable in ~500ms instead of
+ * waiting for the entire greeting to be synthesised first (~1–3s).
+ *
+ * Events:
+ *   event: session   data: {sessionId, scenarioId, scenarioLabel, greeting, language}
+ *   event: audio     data: {pcm (b64 PCM s16le), sampleRate, samples, index, encoding}
+ *   event: done      data: {processingTime}
+ *   event: error     data: {message}
+ */
+app.post('/api/scenario/start/stream', async (req, res) => {
+  const t0 = Date.now();
+  const { scenarioId, voiceId, sessionId: providedSessionId } = req.body || {};
+  const scenario = getScenario(scenarioId);
+  const language = scenario.defaultLanguage || 'de';
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  const send = (event, payload) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  try {
+    const sessionId = providedSessionId || `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    voicePipeline.activeSessions.delete(sessionId);
+    const session = voicePipeline.createSession(sessionId, {
+      language,
+      scenarioId: scenario.id,
+    });
+    const greeting = scenario.greeting;
+
+    send('session', {
+      sessionId,
+      scenarioId: scenario.id,
+      scenarioLabel: scenario.label,
+      greeting,
+      language,
+    });
+
+    let chunkCount = 0;
+    const ttsOpts = voicePipeline.ttsOptions(language);
+    // Fast path: replay the pre-rendered greeting if the user is on the default
+    // voice. ~0ms vs. ~500-1500ms for a fresh Kugel synthesis.
+    const cached = (voiceId === undefined || voiceId === null)
+      ? greetingCache.get(scenario.id)
+      : null;
+    if (cached && cached.length) {
+      for (const c of cached) {
+        send('audio', { index: chunkCount++, ...c });
+      }
+      console.log(`[scenario/start/stream] ${sessionId} cache hit (${cached.length} chunks)`);
+    } else {
+      try {
+        await kugelAudioClient.streamFullTextTts(greeting, {
+          voiceId: voiceId !== undefined ? Number(voiceId) : undefined,
+          language: ttsOpts.language,
+          cfgScale: ttsOpts.cfgScale,
+          normalize: ttsOpts.normalize,
+          onAudio: ({ pcm, sampleRate, samples }) => {
+            chunkCount++;
+            send('audio', {
+              index: chunkCount - 1,
+              pcm: pcm.toString('base64'),
+              sampleRate,
+              samples,
+              encoding: 'pcm_s16le',
+            });
+          },
+        });
+      } catch (e) {
+        console.warn(`[scenario/start] TTS stream failed: ${e.message}`);
+        send('error', { message: `tts: ${e.message}` });
+      }
+    }
+
+    session.context.conversation.messages.push({
+      role: 'assistant',
+      text: greeting,
+      timestamp: new Date().toISOString(),
+    });
+    session.messageCount++;
+
+    console.log(`[scenario/start/stream] ${sessionId} chunks=${chunkCount} took=${Date.now() - t0}ms`);
+    send('done', { processingTime: Date.now() - t0, chunks: chunkCount });
+    res.end();
+  } catch (error) {
+    console.error('scenario/start/stream error:', error);
+    send('error', { message: error.message });
+    res.end();
+  }
+});
+
 /**
  * Kick off a scenario with the agent's opening line.
  * POST /api/scenario/start { scenarioId, voiceId?, sessionId? }
@@ -327,6 +463,34 @@ app.post('/api/scenario/start', async (req, res) => {
  * POST /api/converse  { text, sessionId?, voiceId?, language? }
  * Returns { responseText, intent, escalated, processingTime, sampleRate, audio (base64 wav) }.
  */
+/**
+ * Pure TTS endpoint — turns arbitrary text into a WAV. Used by the
+ * IBM-Orchestrate-widget overlay page (public/orchestrate.html) which
+ * scrapes assistant messages from the widget DOM and pipes each one
+ * through Kugel for the voice layer.
+ *
+ * POST /api/tts  { text, voiceId?, language? }  →  audio/wav
+ */
+app.post('/api/tts', async (req, res) => {
+  try {
+    const { text, voiceId, language } = req.body || {};
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ error: 'text is required' });
+    }
+    const tts = await kugelAudioClient.textToSpeech(text, {
+      voiceId: voiceId !== undefined ? Number(voiceId) : (process.env.KUGELAUDIO_VOICE_ID ? Number(process.env.KUGELAUDIO_VOICE_ID) : undefined),
+      language: language || process.env.KUGELAUDIO_LANGUAGE || 'de',
+    });
+    const wav = pcmToWav(tts.audio, tts.sampleRate);
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(wav);
+  } catch (error) {
+    console.error('tts error:', error);
+    res.status(500).json({ error: 'tts_failed', message: error.message });
+  }
+});
+
 app.post('/api/converse', async (req, res) => {
   try {
     const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
@@ -488,6 +652,12 @@ app.post('/api/converse/stream', async (req, res) => {
     let audioIdx = 0;
     let firstAudioAt = null;
     const ttsStartedAt = Date.now();
+    if (!spokenText || !spokenText.trim()) {
+      console.warn(`[converse/stream] ${sessionId} empty spokenText after cleanup — emitting error`);
+      send('error', { message: 'tts: empty response from LLM' });
+      res.end();
+      return;
+    }
     try {
       await kugelAudioClient.streamFullTextTts(spokenText, {
         // Per-request voiceId: undefined → SDK default voice (matches the
@@ -511,6 +681,10 @@ app.post('/api/converse/stream', async (req, res) => {
     } catch (e) {
       console.warn(`TTS sidecar stream failed: ${e.message}`);
       send('error', { message: `tts: ${e.message}` });
+    }
+    console.log(`[converse/stream] ${sessionId} chunks=${audioIdx} ttfa=${firstAudioAt}ms`);
+    if (audioIdx === 0) {
+      console.warn(`[converse/stream] ${sessionId} emitted ZERO audio chunks — sidecar stuck?`);
     }
 
     // Persist the cleaned text to session memory — follow-up turns then see
@@ -813,6 +987,7 @@ function startLivekitAgent() {
 }
 
 httpServer.listen(PORT, () => {
+  console.log('[boot] greeting-cache build active');
   startTtsSidecar();
   startLivekitAgent();
 
@@ -821,12 +996,27 @@ httpServer.listen(PORT, () => {
     for (let i = 0; i < 30; i++) {
       if (await kugelAudioClient.sidecarHealthy()) {
         console.log('[tts sidecar] reachable on', kugelAudioClient.sidecarUrl);
+        prerenderAllGreetings();
         return;
       }
       await new Promise((r) => setTimeout(r, 500));
     }
     console.warn(`[tts sidecar] NOT reachable on ${kugelAudioClient.sidecarUrl} after 15s`);
   })();
+
+  // Pre-fetch the IBM Cloud IAM token so the very first user turn doesn't
+  // pay the ~500ms-1s OAuth round-trip. Token TTL is ~55min so this stays
+  // valid across the demo session.
+  if (orchestrateClient) {
+    (async () => {
+      try {
+        await orchestrateClient.authenticate();
+        console.log('[orchestrate] IAM token pre-warmed');
+      } catch (e) {
+        console.warn(`[orchestrate] pre-auth failed: ${e.message}`);
+      }
+    })();
+  }
 
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
