@@ -1,6 +1,6 @@
 # KugelAudio × watsonx Orchestrate Integration
 
-A production-ready Node.js integration package combining KugelAudio's advanced voice AI with IBM watsonx Orchestrate for intelligent conversational agents.
+A production-ready Node.js integration package where IBM watsonx Orchestrate owns the dialog flow and KugelAudio provides the voice layer.
 
 ## Overview
 
@@ -9,7 +9,7 @@ This package provides a complete voice pipeline that:
 - **Captures audio streams** via WebSocket
 - **Detects language** automatically (39ms latency, 24 EU languages supported)
 - **Transcribes speech** to text with high confidence
-- **Routes intelligently** through watsonx Orchestrate agents
+- **Routes every dialog turn** through a watsonx Orchestrate agent
 - **Synthesizes responses** with natural voice cloning
 - **Streams audio back** in real-time
 
@@ -18,8 +18,9 @@ Perfect for building customer service agents, support bots, and multilingual voi
 ## Prerequisites
 
 - **Node.js 18+**
+- **Python 3.11-3.13** for the watsonx Orchestrate ADK
 - **KugelAudio API credentials** (API key and endpoint)
-- **IBM watsonx Orchestrate credentials** (API key, URL, project ID)
+- **IBM watsonx Orchestrate credentials** (Orchestrate API key, instance URL, agent ID)
 - **Optional:** Salesforce integration for CRM lookup
 
 ## Quick Start
@@ -28,6 +29,21 @@ Perfect for building customer service agents, support bots, and multilingual voi
 
 ```bash
 npm install
+python3.11 -m pip install -r requirements-adk.txt
+```
+
+Use `python3.11 -m pip`, not the standalone `pip` shim, so the ADK installs with a supported Python version.
+
+The native watsonx Orchestrate agent definition lives at:
+
+```bash
+orchestrate/agents/schaden_meldung_assistant.agent.yaml
+```
+
+Import it into the active Orchestrate ADK environment with:
+
+```bash
+orchestrate agents import -f orchestrate/agents/schaden_meldung_assistant.agent.yaml --safe
 ```
 
 ### 2. Configure Environment
@@ -42,9 +58,9 @@ Edit `.env` with your credentials:
 KUGELAUDIO_API_KEY=your_api_key_here
 KUGELAUDIO_API_URL=https://api.kugelaudio.com/v1
 
-WATSONX_API_KEY=your_watsonx_api_key_here
-WATSONX_URL=https://eu-de.ml.cloud.ibm.com
-WATSONX_PROJECT_ID=your_project_id
+ORCHESTRATE_API_KEY=your_orchestrate_api_key_here
+ORCHESTRATE_INSTANCE_URL=https://eu-de.watson-orchestrate.cloud.ibm.com
+ORCHESTRATE_AGENT_ID=your_orchestrate_agent_id
 
 PORT=3000
 ```
@@ -118,13 +134,10 @@ You can override paths via `LOCAL_HTTPS_CERT_PATH` / `LOCAL_HTTPS_KEY_PATH`.
 
 ### Data Flow
 
-1. **Audio Ingestion**: Client streams audio chunks via WebSocket
-2. **Language Detection**: KugelAudio detects language (39ms average)
-3. **Transcription**: Speech converted to text with confidence scoring
-4. **Intent Classification**: Message routed based on content
-5. **Agent Processing**: watsonx Orchestrate agent handles the query
-6. **Response Synthesis**: Agent response converted to natural speech
-7. **Audio Streaming**: Response audio streamed back to client in real-time
+1. **Voice Input**: The browser captures speech or text input.
+2. **Dialog Orchestration**: watsonx Orchestrate handles the agent turn and business flow.
+3. **Voice Output**: KugelAudio converts the Orchestrate response to speech.
+4. **Audio Playback**: The browser plays the synthesized response.
 
 ## File Structure
 
@@ -286,9 +299,9 @@ KUGELAUDIO_API_KEY=your_api_key
 KUGELAUDIO_API_URL=https://api.kugelaudio.com/v1
 
 # watsonx Orchestrate Configuration
-WATSONX_API_KEY=your_api_key
-WATSONX_URL=https://eu-de.ml.cloud.ibm.com
-WATSONX_PROJECT_ID=your_project_id
+ORCHESTRATE_API_KEY=your_orchestrate_api_key
+ORCHESTRATE_INSTANCE_URL=https://eu-de.watson-orchestrate.cloud.ibm.com
+ORCHESTRATE_AGENT_ID=your_orchestrate_agent_id
 
 # Server Configuration
 PORT=3000

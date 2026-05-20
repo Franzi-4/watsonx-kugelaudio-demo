@@ -31,7 +31,7 @@ Deploy the watsonx Orchestrate × KugelAudio voice demo to Railway in minutes.
 
 - [Railway CLI](https://docs.railway.app/guides/cli) installed
 - GitHub repo with this code
-- KugelAudio and watsonx API credentials
+- KugelAudio and watsonx Orchestrate credentials
 
 ### Steps
 
@@ -55,9 +55,9 @@ Deploy the watsonx Orchestrate × KugelAudio voice demo to Railway in minutes.
    ```bash
    railway variables set KUGELAUDIO_API_KEY=your_key_here
    railway variables set KUGELAUDIO_API_URL=https://api.kugelaudio.com/v1
-   railway variables set WATSONX_API_KEY=your_key_here
-   railway variables set WATSONX_URL=https://eu-de.ml.cloud.ibm.com
-   railway variables set WATSONX_PROJECT_ID=your_project_id
+   railway variables set ORCHESTRATE_API_KEY=your_orchestrate_key_here
+   railway variables set ORCHESTRATE_INSTANCE_URL=https://eu-de.watson-orchestrate.cloud.ibm.com
+   railway variables set ORCHESTRATE_AGENT_ID=your_orchestrate_agent_id
    railway variables set NODE_ENV=production
    ```
 
@@ -78,9 +78,7 @@ Deploy the watsonx Orchestrate × KugelAudio voice demo to Railway in minutes.
 
 ## Environment Variables
 
-Copy from `.env.example` — all are required for live API mode.
-
-**Without these variables, the demo still works in simulation mode (shows realistic demo data).**
+Copy from `.env.example` — Orchestrate variables are required. Without them the demo reports `orchestrate_not_configured` and does not fall back to simulation.
 
 ### Required for Live Mode
 
@@ -90,9 +88,9 @@ KUGELAUDIO_API_KEY=your_api_key_here
 KUGELAUDIO_API_URL=https://api.kugelaudio.com/v1
 
 # IBM watsonx Orchestrate Configuration
-WATSONX_API_KEY=your_api_key_here
-WATSONX_URL=https://eu-de.ml.cloud.ibm.com
-WATSONX_PROJECT_ID=your_project_id
+ORCHESTRATE_API_KEY=your_orchestrate_api_key_here
+ORCHESTRATE_INSTANCE_URL=https://eu-de.watson-orchestrate.cloud.ibm.com
+ORCHESTRATE_AGENT_ID=your_orchestrate_agent_id
 
 # Server
 PORT=3000

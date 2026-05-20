@@ -8,10 +8,9 @@ import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { AccessToken } from 'livekit-server-sdk';
 import KugelAudioClient from './kugelaudio-client.js';
-import WatsonxClient from './watsonx-client.js';
 import OrchestrateClient from './orchestrate-client.js';
 import VoicePipeline from './voice-pipeline.js';
-import { listScenarios, getScenario, getScriptedAssistantTurn, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
+import { listScenarios, getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
 import { cleanLlmText } from './agents/text-cleanup.js';
 
 // Wrap raw PCM16 LE bytes in a minimal WAV container so browsers can <audio src>.
@@ -178,8 +177,8 @@ const httpServer = createAppServer();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static files from public directory
-app.use(express.static('public'));
+// Serve static assets, but let the explicit "/" route choose the primary UI.
+app.use(express.static('public', { index: false }));
 
 // Initialize clients
 const kugelAudioClient = new KugelAudioClient({
@@ -234,19 +233,13 @@ async function streamTtsWithVoiceFallback(text, opts) {
   }
 }
 
-const watsonxClient = new WatsonxClient({
-  apiKey: process.env.WATSONX_API_KEY,
-  url: process.env.WATSONX_URL,
-  projectId: process.env.WATSONX_PROJECT_ID,
-});
-
-// Optional: route chat through watsonx Orchestrate when fully configured.
-// Falls back to direct watsonx.ai chat when any of the three vars are missing.
-const orchestrateConfigured = !!(
-  process.env.ORCHESTRATE_API_KEY &&
-  process.env.ORCHESTRATE_INSTANCE_URL &&
-  process.env.ORCHESTRATE_AGENT_ID
-);
+const REQUIRED_ORCHESTRATE_ENV = [
+  'ORCHESTRATE_API_KEY',
+  'ORCHESTRATE_INSTANCE_URL',
+  'ORCHESTRATE_AGENT_ID',
+];
+const missingOrchestrateEnv = REQUIRED_ORCHESTRATE_ENV.filter((name) => !process.env[name]);
+const orchestrateConfigured = missingOrchestrateEnv.length === 0;
 const orchestrateClient = orchestrateConfigured
   ? new OrchestrateClient({
       apiKey: process.env.ORCHESTRATE_API_KEY,
@@ -256,38 +249,38 @@ const orchestrateClient = orchestrateConfigured
   : null;
 if (orchestrateClient) {
   console.log(`[orchestrate] routing chat through agent ${process.env.ORCHESTRATE_AGENT_ID}`);
-}
-
-// Per-scenario fine-tuned deployment ids (optional). If set, streaming
-// requests for that scenario route to /ml/v1/deployments/{id}/text/chat_stream
-// instead of the foundation-model endpoint.
-const SCENARIO_DEPLOYMENTS = {
-  claims: process.env.WATSONX_DEPLOYMENT_ID_CLAIMS || null,
-  hotline: process.env.WATSONX_DEPLOYMENT_ID_HOTLINE || null,
-};
-for (const [id, dep] of Object.entries(SCENARIO_DEPLOYMENTS)) {
-  if (dep) console.log(`[watsonx] scenario "${id}" → deployment ${dep}`);
+} else {
+  console.warn(`[orchestrate] required configuration missing: ${missingOrchestrateEnv.join(', ')}`);
 }
 
 // Initialize voice pipeline
-const voicePipeline = new VoicePipeline({
-  kugelAudioClient,
-  watsonxClient,
-  orchestrateClient,
-  defaultAgentId: process.env.DEFAULT_AGENT_ID || 'customer-service-agent',
-  voiceConfig: {
-    voiceId: process.env.KUGELAUDIO_VOICE_ID || 'default',
-    language: process.env.KUGELAUDIO_LANGUAGE || 'de',
-    // Anything below is left undefined unless the operator explicitly sets
-    // an env override — undefined means "don't include in the SDK call",
-    // which is what keeps us byte-identical with the reference script.
-    speed: process.env.KUGELAUDIO_SPEED ? Number(process.env.KUGELAUDIO_SPEED) : undefined,
-    cfgScale: process.env.KUGELAUDIO_CFG_SCALE ? Number(process.env.KUGELAUDIO_CFG_SCALE) : undefined,
-    normalize: process.env.KUGELAUDIO_NORMALIZE !== undefined
-      ? process.env.KUGELAUDIO_NORMALIZE === 'true'
-      : undefined,
-  },
-});
+const voicePipeline = orchestrateClient
+  ? new VoicePipeline({
+      kugelAudioClient,
+      orchestrateClient,
+      voiceConfig: {
+        voiceId: process.env.KUGELAUDIO_VOICE_ID || 'default',
+        language: process.env.KUGELAUDIO_LANGUAGE || 'de',
+        // Anything below is left undefined unless the operator explicitly sets
+        // an env override — undefined means "don't include in the SDK call",
+        // which is what keeps us byte-identical with the reference script.
+        speed: process.env.KUGELAUDIO_SPEED ? Number(process.env.KUGELAUDIO_SPEED) : undefined,
+        cfgScale: process.env.KUGELAUDIO_CFG_SCALE ? Number(process.env.KUGELAUDIO_CFG_SCALE) : undefined,
+        normalize: process.env.KUGELAUDIO_NORMALIZE !== undefined
+          ? process.env.KUGELAUDIO_NORMALIZE === 'true'
+          : undefined,
+      },
+    })
+  : null;
+
+function requireOrchestrate() {
+  if (orchestrateClient && voicePipeline) return null;
+  return {
+    error: 'orchestrate_not_configured',
+    message: `Set ${REQUIRED_ORCHESTRATE_ENV.join(', ')} to run the Watson Orchestrate-first flow`,
+    missing: missingOrchestrateEnv,
+  };
+}
 
 // Initialize WebSocket server
 const wss = new WebSocketServer({ server: httpServer });
@@ -309,10 +302,9 @@ wss.on('error', (error) => {
 app.get('/api/health', async (req, res) => {
   try {
     const kugelAudioHealth = await kugelAudioClient.healthCheck();
-    const watsonxHealth = await watsonxClient.healthCheck();
     const orchestrateHealth = orchestrateClient ? await orchestrateClient.healthCheck() : false;
 
-    const status = kugelAudioHealth && watsonxHealth ? 'healthy' : 'degraded';
+    const status = kugelAudioHealth && orchestrateHealth ? 'healthy' : 'degraded';
     const statusCode = status === 'healthy' ? 200 : 503;
 
     res.status(statusCode).json({
@@ -320,18 +312,19 @@ app.get('/api/health', async (req, res) => {
       timestamp: new Date().toISOString(),
       services: {
         kugelaudio: kugelAudioHealth ? 'up' : 'down',
-        watsonx_ai: watsonxHealth ? 'up' : 'down',
         watsonx_orchestrate: orchestrateClient
           ? (orchestrateHealth ? 'up' : 'down')
-          : (process.env.ORCHESTRATE_URL ? 'provisioned' : 'missing'),
+          : 'missing',
         watsonx_governance: process.env.GOVERNANCE_GUID ? 'provisioned' : 'missing',
       },
-      orchestrate: process.env.ORCHESTRATE_URL ? {
-        launch_url: process.env.ORCHESTRATE_URL + '/chat',
-        agent: process.env.ORCHESTRATE_AGENT || process.env.ORCHESTRATE_AGENT_ID || 'AskOrchestrate',
-        active: !!orchestrateClient,
-      } : (orchestrateClient ? { agent: process.env.ORCHESTRATE_AGENT_ID, active: true } : null),
-      model: 'meta-llama/llama-3-3-70b-instruct',
+      orchestrate: orchestrateClient ? {
+        instanceUrl: process.env.ORCHESTRATE_INSTANCE_URL,
+        agentId: process.env.ORCHESTRATE_AGENT_ID,
+        active: orchestrateHealth,
+      } : {
+        active: false,
+        missing: missingOrchestrateEnv,
+      },
     });
   } catch (error) {
     res.status(500).json({
@@ -412,7 +405,14 @@ app.get('/api/livekit/token', async (req, res) => {
  */
 app.get('/api/agents', async (req, res) => {
   try {
-    const agents = await watsonxClient.listAgents();
+    const configError = requireOrchestrate();
+    if (configError) return res.status(503).json(configError);
+    const agents = [{
+      agent_id: process.env.ORCHESTRATE_AGENT_ID,
+      name: process.env.ORCHESTRATE_AGENT_NAME || process.env.ORCHESTRATE_AGENT_ID,
+      runtime: 'watsonx_orchestrate',
+      status: 'configured',
+    }];
     res.json({
       agents,
       count: agents.length,
@@ -441,7 +441,7 @@ app.get('/api/scenarios', (req, res) => {
   res.json(payload);
 
   const defaultScenarioId = payload.defaultScenarioId || payload.scenarios?.[0]?.id;
-  if (defaultScenarioId) {
+  if (defaultScenarioId && voicePipeline) {
     prefetchScenarioOpening(defaultScenarioId, DEFAULT_TTS_VOICE_ID)
       .then((d) => {
         console.log(
@@ -491,7 +491,7 @@ const openingPrefetchCache = new Map();
 const OPENING_PREFETCH_TTL_MS = 2 * 60 * 1000;
 
 function normalizeConversationMode(mode) {
-  return mode === 'script' ? 'script' : 'free';
+  return 'orchestrate';
 }
 
 function openingPrefetchKey(scenarioId, voiceId, conversationMode = 'free') {
@@ -519,51 +519,27 @@ function consumeOpeningPrefetch(scenarioId, voiceId, conversationMode = 'free') 
 }
 
 async function buildScenarioOpening(scenario, { sessionId, conversationMode = 'free' } = {}) {
-  if (
-    normalizeConversationMode(conversationMode) === 'script' &&
-    Array.isArray(scenario.scriptedAssistantTurns) &&
-    scenario.scriptedAssistantTurns.length
-  ) {
-    return scenario.scriptedAssistantTurns[0];
-  }
+  const configError = requireOrchestrate();
+  if (configError) throw new Error(configError.message);
 
   const openerMessages = [
-    { role: 'system', content: scenario.systemPrompt },
     {
       role: 'user',
       content: 'Starte das Gespräch jetzt als erster Agent-Turn. Schreibe genau eine kurze, natürliche Begrüßung für den Kunden und eine konkrete erste Frage. Deutsch, maximal 2 Sätze.',
     },
   ];
 
-  let openingText = '';
-  if (orchestrateClient) {
-    try {
-      const reply = await orchestrateClient.chat(openerMessages, {
-        context: { sessionId, scenarioId: scenario.id, prefetch: true, turn: 'opening' },
-      });
-      openingText = (reply.text || '').trim();
-    } catch (error) {
-      console.warn(`[prefetch] orchestrate opening failed: ${error.message}`);
-    }
-  }
-
-  if (!openingText) {
-    try {
-      const reply = await watsonxClient.chat(openerMessages, {
-        maxTokens: 120,
-        temperature: 0.6,
-      });
-      openingText = (reply.text || '').trim();
-    } catch (error) {
-      console.warn(`[prefetch] watsonx opening failed: ${error.message}`);
-    }
-  }
-
-  if (!openingText) return scenario.greeting;
-  return cleanLlmText(openingText, { language: scenario.defaultLanguage || 'de' }) || scenario.greeting;
+  const reply = await orchestrateClient.chat(openerMessages, {
+    context: { sessionId, scenarioId: scenario.id, prefetch: true, turn: 'opening' },
+  });
+  const openingText = (reply.text || '').trim();
+  if (!openingText) throw new Error('Orchestrate returned an empty opening');
+  return cleanLlmText(openingText, { language: scenario.defaultLanguage || 'de' });
 }
 
 async function prefetchScenarioOpening(scenarioId, voiceId, conversationMode = 'free') {
+  const configError = requireOrchestrate();
+  if (configError) throw new Error(configError.message);
   const scenario = getScenario(scenarioId);
   const mode = normalizeConversationMode(conversationMode);
   const existing = getFreshOpeningPrefetch(scenario.id, voiceId, mode);
@@ -608,6 +584,7 @@ async function prefetchScenarioOpening(scenarioId, voiceId, conversationMode = '
 }
 
 async function prerenderGreeting(scenarioId) {
+  if (!voicePipeline) return;
   const scenario = getScenario(scenarioId);
   if (!scenario?.greeting) return;
   const ttsOpts = voicePipeline.ttsOptions(scenario.defaultLanguage || 'de');
@@ -672,6 +649,9 @@ app.post('/api/scenario/start/stream', async (req, res) => {
   const effectiveVoiceId = resolveVoiceId(voiceId);
   const scenario = getScenario(scenarioId);
   const language = scenario.defaultLanguage || 'de';
+
+  const configError = requireOrchestrate();
+  if (configError) return res.status(503).json(configError);
 
   if (!(await ensureTtsSidecarReady())) {
     return res.status(503).json({
@@ -786,6 +766,9 @@ app.post('/api/scenario/start/stream', async (req, res) => {
  */
 app.post('/api/scenario/start', async (req, res) => {
   try {
+    const configError = requireOrchestrate();
+    if (configError) return res.status(503).json(configError);
+
     if (!(await ensureTtsSidecarReady())) {
       return res.status(503).json({
         error: 'tts_unavailable',
@@ -852,6 +835,9 @@ app.post('/api/scenario/start', async (req, res) => {
  */
 app.post('/api/scenario/prefetch', async (req, res) => {
   try {
+    const configError = requireOrchestrate();
+    if (configError) return res.status(503).json(configError);
+
     if (!(await ensureTtsSidecarReady())) {
       return res.status(503).json({
         error: 'tts_unavailable',
@@ -883,10 +869,7 @@ app.post('/api/scenario/prefetch', async (req, res) => {
  * Returns { responseText, intent, escalated, processingTime, sampleRate, audio (base64 wav) }.
  */
 /**
- * Pure TTS endpoint — turns arbitrary text into a WAV. Used by the
- * IBM-Orchestrate-widget overlay page (public/orchestrate.html) which
- * scrapes assistant messages from the widget DOM and pipes each one
- * through Kugel for the voice layer.
+ * Pure TTS endpoint — turns arbitrary text into a WAV.
  *
  * POST /api/tts  { text, voiceId?, language? }  →  audio/wav
  */
@@ -919,6 +902,9 @@ app.post('/api/tts', async (req, res) => {
 
 app.post('/api/converse', async (req, res) => {
   try {
+    const configError = requireOrchestrate();
+    if (configError) return res.status(503).json(configError);
+
     if (!(await ensureTtsSidecarReady())) {
       return res.status(503).json({
         error: 'tts_unavailable',
@@ -926,8 +912,7 @@ app.post('/api/converse', async (req, res) => {
       });
     }
 
-    const { text, sessionId: providedSessionId, voiceId, language, scenarioId, mode } = req.body || {};
-    const conversationMode = normalizeConversationMode(mode);
+    const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
     const effectiveVoiceId = resolveVoiceId(voiceId);
     if (!text || typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'text is required' });
@@ -941,7 +926,6 @@ app.post('/api/converse', async (req, res) => {
       voicePipeline.createSession(sessionId, {
         language: effectiveLanguage,
         scenarioId: scenario.id,
-        conversationMode,
       });
     }
 
@@ -962,7 +946,6 @@ app.post('/api/converse', async (req, res) => {
       language,
       scenarioId: scenario.id,
       voiceId: effectiveVoiceId,
-      conversationMode,
     });
     const wav = pcmToWav(result.audio, result.sampleRate);
 
@@ -971,15 +954,14 @@ app.post('/api/converse', async (req, res) => {
       userText: result.userText,
       responseText: result.responseText,
       language: result.language,
-      intent: result.intent,
-      escalated: result.escalated,
+      orchestratedBy: result.orchestratedBy,
       processingTime: result.processingTime,
       sampleRate: result.sampleRate,
       audio: wav.toString('base64'),
       audioMime: 'audio/wav',
     });
   } catch (error) {
-    console.error('converse error:', error);
+    console.error(`converse error: ${error.message}`);
     res.status(500).json({ error: 'converse failed', message: error.message });
   }
 });
@@ -1000,12 +982,14 @@ app.post('/api/converse', async (req, res) => {
  */
 app.post('/api/converse/stream', async (req, res) => {
   const t0 = Date.now();
-  const { text, sessionId: providedSessionId, voiceId, language, scenarioId, mode } = req.body || {};
-  const conversationMode = normalizeConversationMode(mode);
+  const { text, sessionId: providedSessionId, voiceId, language, scenarioId } = req.body || {};
   const effectiveVoiceId = resolveVoiceId(voiceId);
   if (!text || typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ error: 'text is required' });
   }
+
+  const configError = requireOrchestrate();
+  if (configError) return res.status(503).json(configError);
 
   if (!(await ensureTtsSidecarReady())) {
     return res.status(503).json({
@@ -1033,17 +1017,14 @@ app.post('/api/converse/stream', async (req, res) => {
       voicePipeline.createSession(sessionId, {
         language: effectiveLanguage,
         scenarioId: scenario.id,
-        conversationMode,
       });
     }
     const session = voicePipeline.getSession(sessionId);
     // Allow the client to switch scenarios mid-session without creating a new session.
     if (scenario.id !== session.scenarioId) session.scenarioId = scenario.id;
-    session.conversationMode = conversationMode;
     send('session', { sessionId, scenarioId: session.scenarioId });
 
     const ttsOpts = voicePipeline.ttsOptions(effectiveLanguage);
-    const scenarioConfig = getScenario(session.scenarioId);
     const llmStartedAt = Date.now();
     const fakeLlmLatencyMs = FAKE_LLM_LATENCY_ENABLED
       ? randomIntBetween(FAKE_LLM_LATENCY_MIN_MS, FAKE_LLM_LATENCY_MAX_MS)
@@ -1058,82 +1039,28 @@ app.post('/api/converse/stream', async (req, res) => {
     const syntheticDelayMs = fakeLlmLatencyMs + fakeAgentDelayMs;
     if (syntheticDelayMs > 0) await sleep(syntheticDelayMs);
 
-    let fullText;
-    let llmMs;
-    const assistantHistoryCount = (session.context.conversation.messages || [])
-      .filter((m) => m.role === 'assistant')
-      .length;
-    const scriptedResponse = (conversationMode === 'script')
-      ? getScriptedAssistantTurn(scenarioConfig, assistantHistoryCount, text, { force: true })
-      : null;
-    if (scriptedResponse) {
-      fullText = scriptedResponse;
-      await emitPseudoDeltaStream(fullText, (chunk) => send('delta', { text: chunk }));
-      llmMs = Date.now() - llmStartedAt;
-    } else if (req.body?.skipLlm) {
-      // Dev escape hatch — useful when watsonx is rate-limited and you only
-      // want to exercise the TTS sidecar path. The user's text becomes the
-      // assistant's response verbatim. Drop this if it ever ships beyond dev.
-      fullText = text;
-      await emitPseudoDeltaStream(fullText, (chunk) => send('delta', { text: chunk }));
-      llmMs = Date.now() - llmStartedAt;
-    } else {
-      const systemPrompt = voicePipeline._buildSystemPrompt(session.scenarioId);
-      const history = (session.context.conversation.messages || []).slice(-8).map((m) => ({
-        role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: m.text,
-      }));
-      const messages = [
-        { role: 'system', content: systemPrompt },
-        ...history,
-        { role: 'user', content: text },
-      ];
+    const history = (session.context.conversation.messages || []).slice(-8).map((m) => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.text,
+    }));
+    const messages = [
+      ...history,
+      { role: 'user', content: text },
+    ];
 
-      // Two-stage flow that matches the colleague's reference pattern:
-      //   1) Stream LLM tokens to the browser as they arrive (so the user sees
-      //      text appear live).
-      //   2) Once LLM is done, hand the COMPLETE text to the Kugel SDK in
-      //      Python — `client.tts.stream_async(text=TEXT, ...)` — and forward
-      //      each AudioChunk to the browser. Full-text-in lets the model plan
-      //      prosody at paragraph level, which is what restores voice quality
-      //      vs. token-incremental streaming.
-      if (orchestrateClient) {
-        // Orchestrate path: non-streaming agent call. Emit the full response as
-        // a single delta so the existing client SSE handler still works.
-        try {
-          const reply = await orchestrateClient.chat(messages, {
-            context: { sessionId, scenarioId: session.scenarioId },
-          });
-          fullText = (reply.text || '').trim();
-          if (fullText) {
-            await emitPseudoDeltaStream(fullText, (chunk) => send('delta', { text: chunk }));
-          }
-        } catch (e) {
-          console.warn(`Orchestrate chat failed: ${e.message} — falling back to watsonx.ai`);
-        }
-        if (!fullText) {
-          const deploymentId = SCENARIO_DEPLOYMENTS[session.scenarioId] || undefined;
-          const result = await watsonxClient.chatStream(messages, {
-            deploymentId,
-            maxTokens: 180,
-            temperature: 0.7,
-            onDelta: (d) => send('delta', { text: d }),
-          });
-          fullText = result.fullText;
-        }
-        llmMs = Date.now() - llmStartedAt;
-      } else {
-        const deploymentId = SCENARIO_DEPLOYMENTS[session.scenarioId] || undefined;
-        const result = await watsonxClient.chatStream(messages, {
-          deploymentId,
-          maxTokens: 180,
-          temperature: 0.7,
-          onDelta: (d) => send('delta', { text: d }),
-        });
-        fullText = result.fullText;
-        llmMs = Date.now() - llmStartedAt;
-      }
-    }
+    console.log(
+      `[converse/stream] ${sessionId} -> orchestrate agent=${process.env.ORCHESTRATE_AGENT_ID} scenario=${session.scenarioId} history=${history.length} userChars=${text.length}`,
+    );
+    const reply = await orchestrateClient.chat(messages, {
+      context: { sessionId, scenarioId: session.scenarioId },
+    });
+    const fullText = (reply.text || '').trim();
+    if (!fullText) throw new Error('Orchestrate returned an empty response');
+    console.log(
+      `[converse/stream] ${sessionId} <- orchestrate responseChars=${fullText.length} llmMs=${Date.now() - llmStartedAt}`,
+    );
+    await emitPseudoDeltaStream(fullText, (chunk) => send('delta', { text: chunk }));
+    const llmMs = Date.now() - llmStartedAt;
 
     // Strip llama's habitual echo-question tag-ons before they hit TTS —
     // the live `delta` stream stays raw (user sees what the model said),
@@ -1199,7 +1126,7 @@ app.post('/api/converse/stream', async (req, res) => {
     });
     res.end();
   } catch (error) {
-    console.error('stream error:', error);
+    console.error(`stream error: ${error.message}`);
     send('error', { message: error.message });
     res.end();
   }
@@ -1220,6 +1147,9 @@ app.post('/api/converse/stream', async (req, res) => {
  */
 app.post('/api/call', async (req, res) => {
   try {
+    const configError = requireOrchestrate();
+    if (configError) return res.status(503).json(configError);
+
     const {
       agentId = process.env.DEFAULT_AGENT_ID || 'customer-service-agent',
       language = 'en',
@@ -1258,6 +1188,9 @@ app.post('/api/call', async (req, res) => {
  */
 app.get('/api/sessions/:sessionId/stats', (req, res) => {
   try {
+    const configError = requireOrchestrate();
+    if (configError) return res.status(503).json(configError);
+
     const { sessionId } = req.params;
     const stats = voicePipeline.getSessionStats(sessionId);
 
@@ -1285,6 +1218,9 @@ app.get('/api/sessions/:sessionId/stats', (req, res) => {
  */
 app.get('/api/sessions', (req, res) => {
   try {
+    const configError = requireOrchestrate();
+    if (configError) return res.status(503).json(configError);
+
     const sessions = voicePipeline.getActiveSessions();
     res.json({
       sessions,
@@ -1331,6 +1267,11 @@ wss.on('connection', (ws, req) => {
   console.log(`[${sessionId}] WebSocket connected`);
 
   try {
+    const configError = requireOrchestrate();
+    if (configError) {
+      ws.close(1011, configError.error);
+      return;
+    }
     // Setup audio stream handler in voice pipeline
     voicePipeline.setupAudioStream(ws, sessionId);
   } catch (error) {
@@ -1344,7 +1285,7 @@ wss.on('connection', (ws, req) => {
 // ============================================================================
 
 /**
- * Root Route - Serve Interactive Demo
+ * Root Route - Serve the custom voice UI.
  * GET /
  */
 app.get('/', (req, res) => {
@@ -1509,7 +1450,7 @@ httpServer.on('error', (error) => {
 });
 
 httpServer.listen(PORT, HOST, () => {
-  console.log('[boot] greeting-cache build active');
+  console.log('[boot] Orchestrate-first flow active');
   startTtsSidecar();
   startLivekitAgent();
 
@@ -1518,7 +1459,6 @@ httpServer.listen(PORT, HOST, () => {
     for (let i = 0; i < 30; i++) {
       if (await kugelAudioClient.sidecarHealthy()) {
         console.log('[tts sidecar] reachable on', kugelAudioClient.sidecarUrl);
-        prerenderAllGreetings();
         return;
       }
       await new Promise((r) => setTimeout(r, 500));
@@ -1558,7 +1498,7 @@ httpServer.listen(PORT, HOST, () => {
 ║                                                            ║
 ║  Environment:                                              ║
 ║    NODE_ENV: ${process.env.NODE_ENV || 'development'}
-║    API Keys: ${process.env.KUGELAUDIO_API_KEY ? '✓' : '✗'} KugelAudio, ${process.env.WATSONX_API_KEY ? '✓' : '✗'} watsonx      ║
+║    API Keys: ${process.env.KUGELAUDIO_API_KEY ? '✓' : '✗'} KugelAudio, ${process.env.ORCHESTRATE_API_KEY ? '✓' : '✗'} Orchestrate ║
 ╚════════════════════════════════════════════════════════════╝
   `);
 });

@@ -4,7 +4,7 @@ import axios from 'axios';
  * watsonx Orchestrate client.
  *
  * Calls the Orchestrate chat completions endpoint on a specific agent.
- * Docs: POST {instanceUrl}/api/v1/orchestrate/{agentId}/chat/completions
+ * Docs: POST {instanceUrl}/v1/orchestrate/{agentId}/chat/completions
  *       body: { messages: [...], stream: false, context: {} }
  *
  * Orchestrate uses an instance-specific API key generated inside the
@@ -19,6 +19,7 @@ class OrchestrateClient {
     this.instanceUrl = (config.instanceUrl || '').replace(/\/$/, '');
     this.agentId = config.agentId;
     this.timeout = config.timeout || 30000;
+    this.logPayloads = config.logPayloads || process.env.ORCHESTRATE_LOG_PAYLOADS === 'true';
 
     this.accessToken = null;
     this.tokenExpiresAt = 0;
@@ -27,6 +28,12 @@ class OrchestrateClient {
       baseURL: this.instanceUrl,
       timeout: this.timeout,
     });
+  }
+
+  _preview(value, maxLen = 260) {
+    if (value === null || value === undefined) return '';
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    return text.length > maxLen ? `${text.slice(0, maxLen)}...` : text;
   }
 
   async authenticate() {
@@ -60,17 +67,40 @@ class OrchestrateClient {
     if (!this.instanceUrl) throw new Error('Orchestrate instanceUrl is required');
 
     const token = await this._ensureToken();
+    const startedAt = Date.now();
+    const requestId = `${context?.sessionId || 'no-session'}:${Date.now().toString(36)}`;
 
-    const { data } = await this.client.post(
-      `/v1/orchestrate/${targetAgent}/chat/completions`,
-      { messages, stream, context },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      },
+    console.log(
+      `[orchestrate/chat] request=${requestId} agent=${targetAgent} stream=${stream} messages=${messages.length} context=${this._preview(context, 180)}`,
     );
+    if (this.logPayloads) {
+      const lastMessage = messages.at(-1);
+      console.log(
+        `[orchestrate/chat] request=${requestId} last_${lastMessage?.role || 'message'}=${this._preview(lastMessage?.content)}`,
+      );
+    }
+
+    let data;
+    try {
+      const response = await this.client.post(
+        `/v1/orchestrate/${targetAgent}/chat/completions`,
+        { messages, stream, context },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+      data = response.data;
+      console.log(
+        `[orchestrate/chat] request=${requestId} status=${response.status} elapsed=${Date.now() - startedAt}ms`,
+      );
+    } catch (error) {
+      const status = error.response?.status;
+      const detail = error.response?.data?.detail || error.response?.data?.message || error.message;
+      throw new Error(`Orchestrate chat failed${status ? ` (${status})` : ''}: ${detail}`);
+    }
 
     // Orchestrate's response shape is OpenAI-ish: choices[0].message.content
     // but can also return a messages[] array for multi-step agent turns.
@@ -78,8 +108,12 @@ class OrchestrateClient {
       data?.choices?.[0]?.message?.content
       ?? data?.messages?.at(-1)?.content
       ?? '';
+    const output = typeof text === 'string' ? text : JSON.stringify(text);
+    console.log(
+      `[orchestrate/chat] request=${requestId} outputChars=${output.length}${this.logPayloads ? ` output=${this._preview(output)}` : ''}`,
+    );
 
-    return { text: typeof text === 'string' ? text : JSON.stringify(text), raw: data };
+    return { text: output, raw: data };
   }
 
   async healthCheck() {

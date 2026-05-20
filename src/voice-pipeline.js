@@ -1,7 +1,6 @@
 import KugelAudioClient from './kugelaudio-client.js';
-import WatsonxClient from './watsonx-client.js';
-import { classifyIntent, generateResponse, buildAgentContext } from './agents/customer-service-agent.js';
-import { getScenario, getScriptedAssistantTurn, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
+import { buildAgentContext } from './agents/customer-service-agent.js';
+import { getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
 import { cleanLlmText } from './agents/text-cleanup.js';
 
 /**
@@ -11,8 +10,8 @@ import { cleanLlmText } from './agents/text-cleanup.js';
  * 1. Receives audio stream via WebSocket
  * 2. KugelAudio STT → Transcribes speech to text
  * 3. Language detection
- * 4. Routes to watsonx Orchestrate agent
- * 5. Gets response from agent
+ * 4. Routes every dialog turn to the watsonx Orchestrate agent
+ * 5. Gets the orchestrated response
  * 6. KugelAudio TTS → Synthesizes response with voice cloning
  * 7. Streams audio back to client
  *
@@ -23,15 +22,15 @@ class VoicePipeline {
    * Initialize voice pipeline
    * @param {Object} config - Configuration object
    * @param {KugelAudioClient} config.kugelAudioClient - KugelAudio API client
-   * @param {WatsonxClient} config.watsonxClient - watsonx.ai chat client
-   * @param {string} config.defaultAgentId - Default agent to route queries to
+   * @param {Object} config.orchestrateClient - watsonx Orchestrate chat client
    * @param {Object} config.voiceConfig - Voice configuration (voiceId, language, etc.)
    */
   constructor(config) {
     this.kugelAudioClient = config.kugelAudioClient;
-    this.watsonxClient = config.watsonxClient;
-    this.orchestrateClient = config.orchestrateClient || null;
-    this.defaultAgentId = config.defaultAgentId;
+    if (!config.orchestrateClient) {
+      throw new Error('VoicePipeline requires orchestrateClient');
+    }
+    this.orchestrateClient = config.orchestrateClient;
     // Only carry values that the caller actually set. cfgScale / normalize /
     // sampleRate left undefined → not forwarded → SDK falls through to its
     // own defaults (cfg_scale=2.0, normalize=True, sample_rate=24000), which
@@ -68,7 +67,6 @@ class VoicePipeline {
       id: sessionId,
       context,
       scenarioId: scenario.id,
-      conversationMode: options.conversationMode === 'script' ? 'script' : 'free',
       conversationId: `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       startTime: Date.now(),
       messageCount: 0,
@@ -94,76 +92,34 @@ class VoicePipeline {
   }
 
   /**
-   * Process a user text turn: agent response + KugelAudio TTS.
-   * Returns { userText, responseText, audio, sampleRate, audioFormat, intent, escalated, processingTime }.
+   * Process a user text turn: Orchestrate response + KugelAudio TTS.
+   * Returns { userText, responseText, audio, sampleRate, audioFormat, processingTime }.
    */
-  async processText(userText, sessionId, { language, scenarioId, voiceId, conversationMode } = {}) {
+  async processText(userText, sessionId, { language, scenarioId, voiceId } = {}) {
     const startTime = Date.now();
     const session = this.getSession(sessionId);
 
     if (scenarioId && scenarioId !== session.scenarioId) {
       session.scenarioId = scenarioId;
     }
-    if (conversationMode === 'script' || conversationMode === 'free') {
-      session.conversationMode = conversationMode;
-    }
     if (language) session.context.conversation.language = language;
     const activeLanguage = session.context.conversation.language || this.voiceConfig.language;
 
-    const scenario = getScenario(session.scenarioId);
-    const assistantHistoryCount = (session.context.conversation.messages || [])
-      .filter((m) => m.role === 'assistant')
-      .length;
+    const history = (session.context.conversation.messages || []).slice(-8).map(m => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.text,
+    }));
+    const messages = [
+      ...history,
+      { role: 'user', content: userText },
+    ];
 
-    const intentResult = classifyIntent(userText);
-    session.context.conversation.intent = intentResult.intent;
-
-    let responseText;
-    let usage;
-    const scriptedResponse = (session.conversationMode === 'script')
-      ? getScriptedAssistantTurn(scenario, assistantHistoryCount, userText, { force: true })
-      : null;
-    if (scriptedResponse) {
-      responseText = scriptedResponse;
-    } else {
-      const systemPrompt = this._buildSystemPrompt(session.scenarioId);
-      const history = (session.context.conversation.messages || []).slice(-8).map(m => ({
-        role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: m.text,
-      }));
-      const messages = [
-        { role: 'system', content: systemPrompt },
-        ...history,
-        { role: 'user', content: userText },
-      ];
-
-      if (this.orchestrateClient) {
-        try {
-          const reply = await this.orchestrateClient.chat(messages, {
-            context: { sessionId, scenarioId: session.scenarioId },
-          });
-          responseText = reply.text?.trim();
-        } catch (error) {
-          console.warn(`[${sessionId}] orchestrate chat failed: ${error.message} — falling back to watsonx.ai`);
-        }
-      }
-      if (!responseText) {
-        try {
-          const reply = await this.watsonxClient.chat(messages, { maxTokens: 250, temperature: 0.7 });
-          responseText = reply.text?.trim();
-          usage = reply.usage;
-        } catch (error) {
-          console.warn(`[${sessionId}] watsonx chat failed: ${error.message} — falling back to local agent`);
-        }
-      }
-      if (!responseText) {
-        responseText = await generateResponse(intentResult.intent, session.context, userText);
-      }
-    }
-
-    if (intentResult.shouldEscalate) {
-      session.context.escalation.triggered = true;
-      session.context.escalation.reason = intentResult.intent;
+    const reply = await this.orchestrateClient.chat(messages, {
+      context: { sessionId, scenarioId: session.scenarioId },
+    });
+    const responseText = reply.text?.trim();
+    if (!responseText) {
+      throw new Error('Orchestrate returned an empty response');
     }
 
     const cleanedResponseText = cleanLlmText(responseText, { language: activeLanguage });
@@ -187,9 +143,7 @@ class VoicePipeline {
       sampleRate: tts.sampleRate,
       audioFormat: tts.audioFormat,
       processingTime: Date.now() - startTime,
-      intent: intentResult.intent,
-      escalated: intentResult.shouldEscalate,
-      usage,
+      orchestratedBy: 'watsonx_orchestrate',
     };
   }
 
@@ -239,8 +193,7 @@ class VoicePipeline {
             sessionId,
             text: result.responseText,
             language: result.language,
-            intent: result.intent,
-            escalated: result.escalated,
+            orchestratedBy: result.orchestratedBy,
             processingTime: result.processingTime,
             sampleRate: result.sampleRate,
             audioFormat: result.audioFormat,
@@ -306,6 +259,7 @@ class VoicePipeline {
       language: session.context.conversation.language,
       isActive: session.isActive,
       escalated: session.context.escalation.triggered,
+      orchestratedBy: 'watsonx_orchestrate',
     };
   }
 

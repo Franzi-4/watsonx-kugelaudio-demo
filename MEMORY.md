@@ -30,6 +30,12 @@ Use this file to persist context between long chat sessions and compaction event
 - Rolled back the increased delay defaults after instability report; active defaults restored to `PRE_SPEECH_DELAY_MS=180` and written text delay `140-340ms`.
 - To reduce "hardcoded" feel in stream mode, scripted/non-streaming text output now emits pseudo-token deltas (small variable chunks + jittered micro-pauses) before TTS starts.
 - Added multi-tier delay behavior: spoken pre-speech delay now samples variable ranges with occasional extra pause, and written reply delay now also adds occasional longer micro-pauses.
+- Orchestrate-first implementation: live dialog APIs now require `ORCHESTRATE_API_KEY`, `ORCHESTRATE_INSTANCE_URL`, and `ORCHESTRATE_AGENT_ID`; direct watsonx.ai/local/script fallbacks were removed from the active server/pipeline path.
+- Updated local `.env` with new Orchestrate runtime credentials from the downloaded IBM credentials file; tested agent is `AskOrchestrate` with ID `5aac5e96-99e0-45dd-970a-2654c78769a5`.
+- Added watsonx Orchestrate ADK as `requirements-adk.txt` pinned to `ibm-watsonx-orchestrate==2.9.1`; install with `python3.11 -m pip`, not the standalone `pip` shim.
+- Added native ADK agent artifact at `orchestrate/agents/schaden_meldung_assistant.agent.yaml`; import with `orchestrate agents import -f orchestrate/agents/schaden_meldung_assistant.agent.yaml --safe`.
+- Activated ADK CLI environment `develop` against the Orchestrate SaaS instance and imported native agent `schaden_meldung_assistant`; imported agent ID is `19ee4fc7-e801-465e-8288-7a73a21dbc3f`.
+- Root route now serves only the custom UI from `public/index.html`; IBM Orchestrate webchat overlay, route, config endpoint, env docs, and HTML fallback were removed.
 
 ## Open Questions
 - None currently.

@@ -11,7 +11,8 @@ cp .env.example .env
 
 # 3. Edit .env with your API keys
 # KUGELAUDIO_API_KEY=...
-# WATSONX_API_KEY=...
+# ORCHESTRATE_API_KEY=...
+# ORCHESTRATE_AGENT_ID=...
 # etc.
 
 # 4. Start the server
@@ -58,9 +59,9 @@ ws.onmessage = (event) => {
 |------|---------|-------------------|
 | `src/server.js` | Express + WebSocket server | Express app, HTTP server setup |
 | `src/kugelaudio-client.js` | KugelAudio API wrapper | `KugelAudioClient` class |
-| `src/watsonx-orchestrate-client.js` | watsonx API wrapper | `WatsonxOrchestrateClient` class |
+| `src/orchestrate-client.js` | watsonx Orchestrate API wrapper | `OrchestrateClient` class |
 | `src/voice-pipeline.js` | Voice processing pipeline | `VoicePipeline` class |
-| `src/agents/customer-service-agent.js` | Agent definition | Agent config, intent classifier, FAQ DB |
+| `public/index.html` | Custom voice UI | Browser voice experience |
 
 ## REST Endpoints
 
@@ -89,8 +90,9 @@ Messages:
 Key environment variables:
 ```env
 KUGELAUDIO_API_KEY=...
-WATSONX_API_KEY=...
-WATSONX_PROJECT_ID=...
+ORCHESTRATE_API_KEY=...
+ORCHESTRATE_INSTANCE_URL=https://eu-de.watson-orchestrate.cloud.ibm.com
+ORCHESTRATE_AGENT_ID=...
 PORT=3000
 ```
 

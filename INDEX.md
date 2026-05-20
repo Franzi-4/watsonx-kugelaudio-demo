@@ -290,14 +290,14 @@ server.js
 Required:
 ```env
 KUGELAUDIO_API_KEY=your_api_key
-WATSONX_API_KEY=your_api_key
-WATSONX_PROJECT_ID=your_project_id
+ORCHESTRATE_API_KEY=your_orchestrate_api_key
+ORCHESTRATE_INSTANCE_URL=https://eu-de.watson-orchestrate.cloud.ibm.com
+ORCHESTRATE_AGENT_ID=your_orchestrate_agent_id
 ```
 
 Optional:
 ```env
 KUGELAUDIO_API_URL=https://api.kugelaudio.com/v1
-WATSONX_URL=https://eu-de.ml.cloud.ibm.com
 SALESFORCE_CLIENT_ID=...
 SALESFORCE_CLIENT_SECRET=...
 SALESFORCE_INSTANCE_URL=...
