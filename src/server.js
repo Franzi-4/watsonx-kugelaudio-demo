@@ -3,7 +3,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import { createServer as createHttpServer } from 'http';
 import { createServer as createHttpsServer } from 'https';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { AccessToken } from 'livekit-server-sdk';
@@ -1330,6 +1330,18 @@ let livekitAgentChild = null;
 process.once('SIGINT', () => { shuttingDown = true; });
 process.once('SIGTERM', () => { shuttingDown = true; });
 
+function resolvePythonCommand() {
+  const venvPython = path.resolve('.venv-tts/bin/python');
+  if (existsSync(venvPython)) return venvPython;
+
+  const candidates = ['python3.11', 'python3', 'python'];
+  for (const candidate of candidates) {
+    const check = spawnSync(candidate, ['--version'], { stdio: 'ignore' });
+    if (check.status === 0) return candidate;
+  }
+  return null;
+}
+
 // Spawn the Python TTS sidecar as a child process so the dev experience is
 // `node src/server.js` and you get a working voice demo. The sidecar owns
 // the persistent KugelAudio SDK client (warm-up, connection reuse) — i.e.
@@ -1348,9 +1360,9 @@ async function startTtsSidecar() {
     return null;
   }
 
-  const venvPython = path.resolve('.venv-tts/bin/python');
-  if (!existsSync(venvPython)) {
-    console.warn(`[tts sidecar] ${venvPython} not found — skipping auto-start. Run: python3.11 -m venv .venv-tts && .venv-tts/bin/pip install -r requirements-tts.txt`);
+  const pythonCommand = resolvePythonCommand();
+  if (!pythonCommand) {
+    console.warn('[tts sidecar] no Python runtime found — skipping auto-start. Install Python 3.11+ and requirements-tts.txt');
     return null;
   }
   if (!existsSync('tts_sidecar.py')) {
@@ -1358,8 +1370,8 @@ async function startTtsSidecar() {
     return null;
   }
 
-  console.log('[tts sidecar] launching Python child process');
-  const child = spawn(venvPython, ['tts_sidecar.py'], {
+  console.log(`[tts sidecar] launching Python child process with ${pythonCommand}`);
+  const child = spawn(pythonCommand, ['tts_sidecar.py'], {
     env: {
       ...process.env,
       KUGELAUDIO_MODEL_ID: process.env.KUGELAUDIO_MODEL_ID || 'kugel-2',
@@ -1409,14 +1421,14 @@ function startLivekitAgent() {
     console.warn('[livekit agent] LIVEKIT_* env vars not set — skipping auto-start');
     return null;
   }
-  const venvPython = path.resolve('.venv-tts/bin/python');
-  if (!existsSync(venvPython) || !existsSync('livekit_agent.py')) {
-    console.warn('[livekit agent] venv or livekit_agent.py missing — skipping');
+  const pythonCommand = resolvePythonCommand();
+  if (!pythonCommand || !existsSync('livekit_agent.py')) {
+    console.warn('[livekit agent] Python runtime or livekit_agent.py missing — skipping');
     return null;
   }
 
-  console.log('[livekit agent] launching worker');
-  const child = spawn(venvPython, ['livekit_agent.py', 'dev'], {
+  console.log(`[livekit agent] launching worker with ${pythonCommand}`);
+  const child = spawn(pythonCommand, ['livekit_agent.py', 'dev'], {
     env: { ...process.env, PYTHONUNBUFFERED: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
