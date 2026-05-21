@@ -2,6 +2,11 @@ import KugelAudioClient from './kugelaudio-client.js';
 import { buildAgentContext } from './agents/customer-service-agent.js';
 import { getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
 import { cleanLlmText } from './agents/text-cleanup.js';
+import {
+  buildClaimStateInstruction,
+  correctRepeatedDamageTypeQuestion,
+  updateClaimStateFromUserText,
+} from './agents/claims-state.js';
 
 /**
  * Voice Pipeline Manager
@@ -104,6 +109,7 @@ class VoicePipeline {
     }
     if (language) session.context.conversation.language = language;
     const activeLanguage = session.context.conversation.language || this.voiceConfig.language;
+    const claimState = updateClaimStateFromUserText(session, userText);
 
     const history = (session.context.conversation.messages || []).slice(-8).map(m => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
@@ -115,7 +121,8 @@ class VoicePipeline {
       'AKTUELLER TURN: Der Kunde hat bereits gesprochen. Antworte deshalb niemals mit einer Begruessung, Vorstellung oder Telefon-Eroeffnung.',
       'Verbotene Phrasen in diesem Turn: "Guten Tag", "hier ist Anton", "schoen, dass Sie anrufen", "schön, dass Sie anrufen".',
       'Wenn die aktuelle Kundeneingabe eine Schadensart enthaelt, bestaetige sie kurz und frage direkt nach dem naechsten fehlenden Feld. Beispiel: "Ich habe den Autounfall notiert. Wo ist der Schaden passiert?"',
-    ].join('\n');
+      buildClaimStateInstruction(claimState),
+    ].filter(Boolean).join('\n');
     const messages = [
       { role: 'system', content: turnGuard },
       ...history,
@@ -132,7 +139,10 @@ class VoicePipeline {
       throw new Error('Orchestrate returned an empty response');
     }
 
-    const cleanedResponseText = cleanLlmText(responseText, { language: activeLanguage });
+    const cleanedResponseText = correctRepeatedDamageTypeQuestion(
+      cleanLlmText(responseText, { language: activeLanguage }),
+      claimState,
+    );
 
     const tts = await this.kugelAudioClient.textToSpeech(cleanedResponseText, {
       ...this.ttsOptions(activeLanguage),

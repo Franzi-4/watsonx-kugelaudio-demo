@@ -12,6 +12,11 @@ import OrchestrateClient from './orchestrate-client.js';
 import VoicePipeline from './voice-pipeline.js';
 import { listScenarios, getScenario, DEFAULT_SCENARIO_ID } from './agents/scenarios.js';
 import { cleanLlmText } from './agents/text-cleanup.js';
+import {
+  buildClaimStateInstruction,
+  correctRepeatedDamageTypeQuestion,
+  updateClaimStateFromUserText,
+} from './agents/claims-state.js';
 
 // Wrap raw PCM16 LE bytes in a minimal WAV container so browsers can <audio src>.
 function pcmToWav(pcm, sampleRate, channels = 1, bitsPerSample = 16) {
@@ -969,6 +974,7 @@ app.post('/api/converse/stream', async (req, res) => {
     const session = voicePipeline.getSession(sessionId);
     // Allow the client to switch scenarios mid-session without creating a new session.
     if (scenario.id !== session.scenarioId) session.scenarioId = scenario.id;
+    const claimState = updateClaimStateFromUserText(session, text);
     send('session', { sessionId, scenarioId: session.scenarioId });
 
     const ttsOpts = voicePipeline.ttsOptions(effectiveLanguage);
@@ -995,6 +1001,7 @@ app.post('/api/converse/stream', async (req, res) => {
       'AKTUELLER TURN: Der Kunde hat bereits gesprochen. Antworte deshalb niemals mit einer Begruessung, Vorstellung oder Telefon-Eroeffnung.',
       'Verbotene Phrasen in diesem Turn: "Guten Tag", "hier ist Anton", "schoen, dass Sie anrufen", "schön, dass Sie anrufen".',
       'Wenn die aktuelle Kundeneingabe eine Schadensart enthaelt, bestaetige sie kurz und frage direkt nach dem naechsten fehlenden Feld. Beispiel: "Ich habe den Autounfall notiert. Wo ist der Schaden passiert?"',
+      buildClaimStateInstruction(claimState),
     ].filter(Boolean).join('\n');
     const messages = [
       { role: 'system', content: turnGuard },
@@ -1010,7 +1017,10 @@ app.post('/api/converse/stream', async (req, res) => {
       threadId: session.orchestrateThreadId,
     });
     if (reply.threadId) session.orchestrateThreadId = reply.threadId;
-    const fullText = (reply.text || '').trim();
+    const fullText = correctRepeatedDamageTypeQuestion(
+      cleanLlmText((reply.text || '').trim(), { language: effectiveLanguage }),
+      claimState,
+    );
     if (!fullText) throw new Error('Orchestrate returned an empty response');
     console.log(
       `[converse/stream] ${sessionId} <- orchestrate responseChars=${fullText.length} llmMs=${Date.now() - llmStartedAt}`,
@@ -1022,7 +1032,7 @@ app.post('/api/converse/stream', async (req, res) => {
     // the live `delta` stream stays raw (user sees what the model said),
     // but everything from here forward (TTS, session history, done event)
     // uses the cleaned version so what's heard matches what's persisted.
-    const spokenText = cleanLlmText(fullText, { language: effectiveLanguage });
+    const spokenText = fullText;
 
     let audioIdx = 0;
     let firstAudioAt = null;
