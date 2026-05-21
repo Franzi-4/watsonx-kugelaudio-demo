@@ -502,6 +502,13 @@ async function buildScenarioOpening(scenario, { sessionId, conversationMode = 'f
 
   const openerMessages = [
     {
+      role: 'system',
+      content: [
+        scenario.systemPrompt,
+        'AKTUELLER TURN: Dies ist der einzige erlaubte Eroeffnungs-Turn. Begruesse nur jetzt kurz und frage direkt nach der Schadensart.',
+      ].filter(Boolean).join('\n'),
+    },
+    {
       role: 'user',
       content: 'Starte das Gespräch jetzt als erster Agent-Turn. Schreibe genau eine kurze, natürliche Begrüßung für den Kunden und eine konkrete erste Frage. Deutsch, maximal 2 Sätze.',
     },
@@ -512,7 +519,10 @@ async function buildScenarioOpening(scenario, { sessionId, conversationMode = 'f
   });
   const openingText = (reply.text || '').trim();
   if (!openingText) throw new Error('Orchestrate returned an empty opening');
-  return cleanLlmText(openingText, { language: scenario.defaultLanguage || 'de' });
+  return {
+    text: cleanLlmText(openingText, { language: scenario.defaultLanguage || 'de' }),
+    threadId: reply.threadId,
+  };
 }
 
 async function prefetchScenarioOpening(scenarioId, voiceId, conversationMode = 'free') {
@@ -524,10 +534,11 @@ async function prefetchScenarioOpening(scenarioId, voiceId, conversationMode = '
   if (existing) return { ...existing, cacheHit: true };
 
   const language = scenario.defaultLanguage || 'de';
-  const openingText = await buildScenarioOpening(scenario, {
+  const opening = await buildScenarioOpening(scenario, {
     sessionId: `prefetch_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
     conversationMode: mode,
   });
+  const openingText = opening.text;
   const ttsOpts = voicePipeline.ttsOptions(language);
   const chunks = [];
 
@@ -551,6 +562,7 @@ async function prefetchScenarioOpening(scenarioId, voiceId, conversationMode = '
     scenarioId: scenario.id,
     language,
     greeting: openingText,
+    threadId: opening.threadId,
     audioChunks: chunks,
     usedVoiceId: ttsResult.usedVoiceId,
     createdAt: Date.now(),
@@ -621,10 +633,14 @@ app.post('/api/scenario/start/stream', async (req, res) => {
       conversationMode,
     });
     const prefetched = consumeOpeningPrefetch(scenario.id, effectiveVoiceId, conversationMode);
-    const greeting = prefetched?.greeting || await buildScenarioOpening(scenario, {
-      sessionId,
-      conversationMode,
-    });
+    const opening = prefetched
+      ? { text: prefetched.greeting, threadId: prefetched.threadId }
+      : await buildScenarioOpening(scenario, {
+          sessionId,
+          conversationMode,
+        });
+    const greeting = opening.text;
+    if (opening.threadId) session.orchestrateThreadId = opening.threadId;
 
     send('session', {
       sessionId,
@@ -722,10 +738,12 @@ app.post('/api/scenario/start', async (req, res) => {
     // Per-request voiceId only — if undefined (UI sent SDK-Default) the
     // SDK falls back to its built-in default voice, which is what the
     // colleague's reference script tests with.
-    const greeting = await buildScenarioOpening(scenario, {
+    const opening = await buildScenarioOpening(scenario, {
       sessionId,
       conversationMode,
     });
+    const greeting = opening.text;
+    if (opening.threadId) session.orchestrateThreadId = opening.threadId;
     const tts = await kugelAudioClient.textToSpeech(greeting, {
       ...voicePipeline.ttsOptions(scenario.defaultLanguage || 'de'),
       voiceId: effectiveVoiceId,
@@ -972,7 +990,14 @@ app.post('/api/converse/stream', async (req, res) => {
       role: m.role === 'assistant' ? 'assistant' : 'user',
       content: m.text,
     }));
+    const turnGuard = [
+      scenario.systemPrompt,
+      'AKTUELLER TURN: Der Kunde hat bereits gesprochen. Antworte deshalb niemals mit einer Begruessung, Vorstellung oder Telefon-Eroeffnung.',
+      'Verbotene Phrasen in diesem Turn: "Guten Tag", "hier ist Anton", "schoen, dass Sie anrufen", "schön, dass Sie anrufen".',
+      'Wenn die aktuelle Kundeneingabe eine Schadensart enthaelt, bestaetige sie kurz und frage direkt nach dem naechsten fehlenden Feld. Beispiel: "Ich habe den Autounfall notiert. Wo ist der Schaden passiert?"',
+    ].filter(Boolean).join('\n');
     const messages = [
+      { role: 'system', content: turnGuard },
       ...history,
       { role: 'user', content: text },
     ];
@@ -982,7 +1007,9 @@ app.post('/api/converse/stream', async (req, res) => {
     );
     const reply = await orchestrateClient.chat(messages, {
       context: { sessionId, scenarioId: session.scenarioId },
+      threadId: session.orchestrateThreadId,
     });
+    if (reply.threadId) session.orchestrateThreadId = reply.threadId;
     const fullText = (reply.text || '').trim();
     if (!fullText) throw new Error('Orchestrate returned an empty response');
     console.log(

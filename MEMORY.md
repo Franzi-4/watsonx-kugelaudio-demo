@@ -38,6 +38,8 @@ Use this file to persist context between long chat sessions and compaction event
 - Root route now serves only the custom UI from `public/index.html`; IBM Orchestrate webchat overlay, route, config endpoint, env docs, and HTML fallback were removed.
 - Production TTS sidecar startup no longer requires `.venv-tts`; server resolves `python3.11`/`python3` and Nixpacks installs `requirements.txt` -> `requirements-tts.txt`.
 - Removed remaining hardcoded/scripted assistant turns, local greeting cache, UI stream-to-nonstream fallback calls, and TTS default-voice retry; active assistant speech now fails fast unless Orchestrate plus selected Kugel TTS path succeeds.
+- ADK agent instructions now explicitly allow greetings only on the first agent turn; after any customer input, Anton must confirm the captured value and ask for the next missing field without saying "Guten Tag" again.
+- Orchestrate chat completions require reusing the returned `thread_id` via `X-IBM-THREAD-ID`; without this, the native agent treats each turn as a new conversation and repeats its welcome greeting.
 
 ## Open Questions
 - None currently.

@@ -61,7 +61,7 @@ class OrchestrateClient {
    * messages: [{ role, content }]
    * Returns { text, raw }.
    */
-  async chat(messages, { agentId, stream = false, context = {} } = {}) {
+  async chat(messages, { agentId, stream = false, context = {}, threadId } = {}) {
     const targetAgent = agentId || this.agentId;
     if (!targetAgent) throw new Error('Orchestrate agentId is required');
     if (!this.instanceUrl) throw new Error('Orchestrate instanceUrl is required');
@@ -89,6 +89,7 @@ class OrchestrateClient {
           headers: {
             Authorization: `Bearer ${token}`,
             'Content-Type': 'application/json',
+            ...(threadId ? { 'X-IBM-THREAD-ID': threadId } : {}),
           },
         },
       );
@@ -110,10 +111,10 @@ class OrchestrateClient {
       ?? '';
     const output = typeof text === 'string' ? text : JSON.stringify(text);
     console.log(
-      `[orchestrate/chat] request=${requestId} outputChars=${output.length}${this.logPayloads ? ` output=${this._preview(output)}` : ''}`,
+      `[orchestrate/chat] request=${requestId} thread=${data?.thread_id || 'none'} outputChars=${output.length}${this.logPayloads ? ` output=${this._preview(output)}` : ''}`,
     );
 
-    return { text: output, raw: data };
+    return { text: output, raw: data, threadId: data?.thread_id };
   }
 
   async healthCheck() {

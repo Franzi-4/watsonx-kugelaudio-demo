@@ -109,14 +109,24 @@ class VoicePipeline {
       role: m.role === 'assistant' ? 'assistant' : 'user',
       content: m.text,
     }));
+    const scenario = getScenario(session.scenarioId);
+    const turnGuard = [
+      scenario.systemPrompt || this._buildSystemPrompt(session.scenarioId),
+      'AKTUELLER TURN: Der Kunde hat bereits gesprochen. Antworte deshalb niemals mit einer Begruessung, Vorstellung oder Telefon-Eroeffnung.',
+      'Verbotene Phrasen in diesem Turn: "Guten Tag", "hier ist Anton", "schoen, dass Sie anrufen", "schön, dass Sie anrufen".',
+      'Wenn die aktuelle Kundeneingabe eine Schadensart enthaelt, bestaetige sie kurz und frage direkt nach dem naechsten fehlenden Feld. Beispiel: "Ich habe den Autounfall notiert. Wo ist der Schaden passiert?"',
+    ].join('\n');
     const messages = [
+      { role: 'system', content: turnGuard },
       ...history,
       { role: 'user', content: userText },
     ];
 
     const reply = await this.orchestrateClient.chat(messages, {
       context: { sessionId, scenarioId: session.scenarioId },
+      threadId: session.orchestrateThreadId,
     });
+    if (reply.threadId) session.orchestrateThreadId = reply.threadId;
     const responseText = reply.text?.trim();
     if (!responseText) {
       throw new Error('Orchestrate returned an empty response');
