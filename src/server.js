@@ -190,7 +190,6 @@ const kugelAudioClient = new KugelAudioClient({
 const DEFAULT_TTS_VOICE_ID = process.env.KUGELAUDIO_VOICE_ID
   ? Number(process.env.KUGELAUDIO_VOICE_ID)
   : undefined;
-const ALLOW_DEFAULT_VOICE_FALLBACK = process.env.KUGELAUDIO_ALLOW_DEFAULT_VOICE_FALLBACK === 'true';
 
 function resolveVoiceId(voiceId) {
   if (voiceId === undefined || voiceId === null || voiceId === '') return DEFAULT_TTS_VOICE_ID;
@@ -199,38 +198,18 @@ function resolveVoiceId(voiceId) {
 }
 
 /**
- * Stream TTS and retry once without voiceId when provider-specific voice
- * selection fails (e.g. timeout/aborted for one voice profile).
+ * Stream TTS with the selected voice. Fail fast if the configured path fails.
  */
-async function streamTtsWithVoiceFallback(text, opts) {
+async function streamTtsWithVoice(text, opts) {
   const requestedVoiceId = resolveVoiceId(opts.voiceId);
-  const baseOpts = {
+  await kugelAudioClient.streamFullTextTts(text, {
     language: opts.language,
     cfgScale: opts.cfgScale,
     normalize: opts.normalize,
     onAudio: opts.onAudio,
-  };
-
-  try {
-    await kugelAudioClient.streamFullTextTts(text, {
-      ...baseOpts,
-      voiceId: requestedVoiceId,
-    });
-    return { usedFallback: false, usedVoiceId: requestedVoiceId };
-  } catch (error) {
-    if (requestedVoiceId === undefined) throw error;
-    if (!ALLOW_DEFAULT_VOICE_FALLBACK) {
-      console.warn(
-        `[${opts.logTag || 'tts'}] stream failed with pinned voiceId=${requestedVoiceId}: ${error.message} — fallback disabled`,
-      );
-      throw error;
-    }
-    console.warn(
-      `[${opts.logTag || 'tts'}] stream failed with voiceId=${requestedVoiceId}: ${error.message} — retrying with SDK default voice`,
-    );
-    await kugelAudioClient.streamFullTextTts(text, baseOpts);
-    return { usedFallback: true, usedVoiceId: undefined };
-  }
+    voiceId: requestedVoiceId,
+  });
+  return { usedVoiceId: requestedVoiceId };
 }
 
 const REQUIRED_ORCHESTRATE_ENV = [
@@ -485,8 +464,7 @@ app.get('/api/voices', async (req, res) => {
   }
 });
 
-// Pre-rendered greeting audio cache for instant playback on "Gespräch starten".
-const greetingCache = new Map();
+// Prefetched Orchestrate openings for instant playback on "Gespräch starten".
 const openingPrefetchCache = new Map();
 const OPENING_PREFETCH_TTL_MS = 2 * 60 * 1000;
 
@@ -553,7 +531,7 @@ async function prefetchScenarioOpening(scenarioId, voiceId, conversationMode = '
   const ttsOpts = voicePipeline.ttsOptions(language);
   const chunks = [];
 
-  const ttsResult = await streamTtsWithVoiceFallback(openingText, {
+  const ttsResult = await streamTtsWithVoice(openingText, {
     voiceId,
     language: ttsOpts.language,
     cfgScale: ttsOpts.cfgScale,
@@ -574,49 +552,13 @@ async function prefetchScenarioOpening(scenarioId, voiceId, conversationMode = '
     language,
     greeting: openingText,
     audioChunks: chunks,
-    usedFallbackVoice: ttsResult.usedFallback,
+    usedVoiceId: ttsResult.usedVoiceId,
     createdAt: Date.now(),
     expiresAt: Date.now() + OPENING_PREFETCH_TTL_MS,
     cacheHit: false,
   };
   openingPrefetchCache.set(openingPrefetchKey(scenario.id, voiceId, mode), record);
   return record;
-}
-
-async function prerenderGreeting(scenarioId) {
-  if (!voicePipeline) return;
-  const scenario = getScenario(scenarioId);
-  if (!scenario?.greeting) return;
-  const ttsOpts = voicePipeline.ttsOptions(scenario.defaultLanguage || 'de');
-  const chunks = [];
-  const t0 = Date.now();
-  try {
-    await kugelAudioClient.streamFullTextTts(scenario.greeting, {
-      language: ttsOpts.language,
-      cfgScale: ttsOpts.cfgScale,
-      normalize: ttsOpts.normalize,
-      onAudio: ({ pcm, sampleRate, samples }) => {
-        chunks.push({
-          pcm: pcm.toString('base64'),
-          sampleRate,
-          samples,
-          encoding: 'pcm_s16le',
-        });
-      },
-    });
-    greetingCache.set(scenario.id, chunks);
-    console.log(`[greeting cache] ${scenario.id}: ${chunks.length} chunks (${Date.now() - t0}ms)`);
-  } catch (e) {
-    console.warn(`[greeting cache] ${scenario.id} failed: ${e.message}`);
-  }
-}
-
-async function prerenderAllGreetings() {
-  const ids = listScenarios().map((s) => s.id);
-  console.log(`[greeting cache] prerendering ${ids.length} scenarios: ${ids.join(', ')}`);
-  for (const id of ids) {
-    await prerenderGreeting(id);
-  }
 }
 
 async function ensureTtsSidecarReady(timeoutMs = 12000) {
@@ -703,40 +645,27 @@ app.post('/api/scenario/start/stream', async (req, res) => {
       }
       console.log(`[scenario/start/stream] ${sessionId} prefetch hit (${prefetchedAudio.length} chunks)`);
     } else {
-      const cached = (effectiveVoiceId === undefined || effectiveVoiceId === null)
-        ? greetingCache.get(scenario.id)
-        : null;
-      if (cached && greeting === scenario.greeting) {
-        for (const c of cached) {
-          send('audio', { index: chunkCount++, ...c });
-        }
-        console.log(`[scenario/start/stream] ${sessionId} static cache hit (${cached.length} chunks)`);
-      } else {
-        try {
-          const ttsResult = await streamTtsWithVoiceFallback(greeting, {
-            voiceId: effectiveVoiceId,
-            language: ttsOpts.language,
-            cfgScale: ttsOpts.cfgScale,
-            normalize: ttsOpts.normalize,
-            logTag: 'scenario/start',
-            onAudio: ({ pcm, sampleRate, samples }) => {
-              chunkCount++;
-              send('audio', {
-                index: chunkCount - 1,
-                pcm: pcm.toString('base64'),
-                sampleRate,
-                samples,
-                encoding: 'pcm_s16le',
-              });
-            },
-          });
-          if (ttsResult.usedFallback) {
-            console.log(`[scenario/start/stream] ${sessionId} retried with SDK default voice`);
-          }
-        } catch (e) {
-          console.warn(`[scenario/start] TTS stream failed: ${e.message}`);
-          send('error', { message: `tts: ${e.message}` });
-        }
+      try {
+        await streamTtsWithVoice(greeting, {
+          voiceId: effectiveVoiceId,
+          language: ttsOpts.language,
+          cfgScale: ttsOpts.cfgScale,
+          normalize: ttsOpts.normalize,
+          logTag: 'scenario/start',
+          onAudio: ({ pcm, sampleRate, samples }) => {
+            chunkCount++;
+            send('audio', {
+              index: chunkCount - 1,
+              pcm: pcm.toString('base64'),
+              sampleRate,
+              samples,
+              encoding: 'pcm_s16le',
+            });
+          },
+        });
+      } catch (e) {
+        console.warn(`[scenario/start] TTS stream failed: ${e.message}`);
+        send('error', { message: `tts: ${e.message}` });
       }
     }
 
@@ -761,8 +690,8 @@ app.post('/api/scenario/start/stream', async (req, res) => {
  * Kick off a scenario with the agent's opening line.
  * POST /api/scenario/start { scenarioId, voiceId?, sessionId? }
  *
- * Returns the scenario's canned greeting plus Kugel TTS audio so the UI can
- * open the call with the agent speaking first — no LLM round-trip needed.
+ * Returns the Orchestrate-generated opening plus Kugel TTS audio so the UI can
+ * open the call with the agent speaking first.
  */
 app.post('/api/scenario/start', async (req, res) => {
   try {
@@ -1080,7 +1009,7 @@ app.post('/api/converse/stream', async (req, res) => {
     try {
       const preSpeechDelayMs = samplePreSpeechDelayMs();
       if (preSpeechDelayMs > 0) await sleep(preSpeechDelayMs);
-      const ttsResult = await streamTtsWithVoiceFallback(spokenText, {
+      await streamTtsWithVoice(spokenText, {
         voiceId: effectiveVoiceId,
         language: ttsOpts.language,
         cfgScale: ttsOpts.cfgScale,
@@ -1097,9 +1026,6 @@ app.post('/api/converse/stream', async (req, res) => {
           });
         },
       });
-      if (ttsResult.usedFallback) {
-        console.log(`[converse/stream] ${sessionId} retried with SDK default voice`);
-      }
     } catch (e) {
       console.warn(`TTS sidecar stream failed: ${e.message}`);
       send('error', { message: `tts: ${e.message}` });

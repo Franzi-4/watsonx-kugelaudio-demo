@@ -37,6 +37,7 @@ Use this file to persist context between long chat sessions and compaction event
 - Activated ADK CLI environment `develop` against the Orchestrate SaaS instance and imported native agent `schaden_meldung_assistant`; imported agent ID is `19ee4fc7-e801-465e-8288-7a73a21dbc3f`.
 - Root route now serves only the custom UI from `public/index.html`; IBM Orchestrate webchat overlay, route, config endpoint, env docs, and HTML fallback were removed.
 - Production TTS sidecar startup no longer requires `.venv-tts`; server resolves `python3.11`/`python3` and Nixpacks installs `requirements.txt` -> `requirements-tts.txt`.
+- Removed remaining hardcoded/scripted assistant turns, local greeting cache, UI stream-to-nonstream fallback calls, and TTS default-voice retry; active assistant speech now fails fast unless Orchestrate plus selected Kugel TTS path succeeds.
 
 ## Open Questions
 - None currently.

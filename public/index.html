@@ -745,9 +745,9 @@
   .live-warn.hidden { display: none; }
   .live-warn a { color: inherit; text-decoration: underline; }
 
-  /* Fallback text input inside the live overlay for browsers where
+  /* Manual text input inside the live overlay for browsers where
      Web Speech isn't actually working (Dia, Arc, Brave in some configs). */
-  .live-fallback {
+  .live-manual-input {
     width: min(520px, 90vw);
     display: flex;
     gap: 6px;
@@ -757,7 +757,7 @@
     border-radius: var(--radius);
     align-items: center;
   }
-  .live-fallback input {
+  .live-manual-input input {
     flex: 1;
     background: transparent;
     border: none;
@@ -767,8 +767,8 @@
     color: var(--fg);
     padding: 6px 0;
   }
-  .live-fallback input::placeholder { color: var(--fg-4); }
-  .live-fallback button {
+  .live-manual-input input::placeholder { color: var(--fg-4); }
+  .live-manual-input button {
     font: inherit;
     font-size: 12px;
     padding: 6px 12px;
@@ -778,7 +778,7 @@
     color: var(--bg);
     cursor: pointer;
   }
-  .live-fallback button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .live-manual-input button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .orb-inner {
     font-family: var(--mono);
@@ -918,9 +918,9 @@
   </div>
   <div id="liveTranscript" class="live-transcript empty">Sprich einfach los …</div>
   <div id="liveWarn" class="live-warn hidden"></div>
-  <div class="live-fallback">
-    <input id="liveFallbackInput" type="text" placeholder="oder tippen, falls das Mikro nicht geht …" autocomplete="off" />
-    <button id="liveFallbackSend" type="button">Senden</button>
+  <div class="live-manual-input">
+    <input id="liveManualInput" type="text" placeholder="oder tippen, falls das Mikro nicht geht …" autocomplete="off" />
+    <button id="liveManualSend" type="button">Senden</button>
   </div>
   <button class="live-stop" id="liveStopBtn">Gespräch beenden</button>
 </div>
@@ -1203,23 +1203,8 @@
       await pcmStreamFinished();
       if (liveActive) startLiveListening();
     } catch (e) {
-      try {
-        showError('Streaming-Start fehlgeschlagen, nutze Fallback …');
-        const d = await fetchScenarioStartFallback(s.id);
-        sessionId = d.sessionId;
-        thread.innerHTML = '';
-        addMessage({
-          role: 'assistant',
-          text: d.greeting || '',
-          meta: `${d.scenarioLabel || s.label} · Kugel Audio (fallback)`,
-        });
-        setOrbState('speaking');
-        await playBase64Wav(d.audio);
-        if (liveActive) startLiveListening();
-      } catch (fallbackErr) {
-        showError(`Konnte Gespräch nicht starten: ${fallbackErr.message || e.message}`);
-        liveStop();
-      }
+      showError(`Konnte Gespräch nicht starten: ${e.message}`);
+      liveStop();
     }
   }
 
@@ -1356,38 +1341,6 @@
     setTimeout(() => errorBanner.classList.add('hidden'), 6000);
   }
 
-  async function fetchScenarioStartFallback(scenarioId) {
-    const body = { scenarioId, sessionId };
-    if (selectedVoiceId !== null && selectedVoiceId !== undefined) body.voiceId = selectedVoiceId;
-    body.mode = conversationMode;
-    const r = await fetch('/api/scenario/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      throw new Error(err.message || `HTTP ${r.status}`);
-    }
-    return r.json();
-  }
-
-  async function fetchConverseFallback(text) {
-    const body = { text, sessionId, scenarioId: selectedScenarioId };
-    if (selectedVoiceId !== null && selectedVoiceId !== undefined) body.voiceId = selectedVoiceId;
-    body.mode = conversationMode;
-    const r = await fetch('/api/converse', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      throw new Error(err.message || `HTTP ${r.status}`);
-    }
-    return r.json();
-  }
-
   async function send() {
     const text = input.value.trim();
     if (!text || sending) return;
@@ -1460,6 +1413,9 @@
 
   let liveActive = false;
   let liveRecog = null;
+  let liveListening = false;
+  let liveSubmitting = false;
+  let liveRestartTimer = null;
   let liveAudio = null;          // legacy HTMLAudioElement (unused once audioCtx is alive)
   let liveSilenceTimer = null;
   let liveBuffer = '';
@@ -1474,8 +1430,8 @@
   const SPEECH_WATCHDOG_MS = 9000;       // if mic's alive but no words recognised
   const liveWarn = $('liveWarn');
   const micFill = $('micFill');
-  const liveFallbackInput = $('liveFallbackInput');
-  const liveFallbackSend = $('liveFallbackSend');
+  const liveManualInput = $('liveManualInput');
+  const liveManualSend = $('liveManualSend');
   let audioStartWatchdog = null;
   let speechWatchdog = null;
   let micUnavailableReason = '';
@@ -1608,7 +1564,7 @@
   }
 
   // enqueuePcmChunk assumes the AudioContext is already running (caller's
-  // responsibility). The async resume inside is a defensive fallback only.
+  // responsibility). The async resume inside is a defensive safety net.
   async function enqueuePcmChunk(b64, sampleRate) {
     if (!audioCtx) return;
     if (audioCtx.state === 'suspended') {
@@ -1688,6 +1644,10 @@
 
   function clearLiveSilenceTimer() {
     if (liveSilenceTimer) { clearTimeout(liveSilenceTimer); liveSilenceTimer = null; }
+  }
+
+  function clearLiveRestartTimer() {
+    if (liveRestartTimer) { clearTimeout(liveRestartTimer); liveRestartTimer = null; }
   }
 
   // Explicitly grant mic + unlock AudioContext on a user gesture. Keeps the
@@ -1839,7 +1799,10 @@
 
   function liveStop() {
     liveActive = false;
+    liveListening = false;
+    liveSubmitting = false;
     clearLiveSilenceTimer();
+    clearLiveRestartTimer();
     clearWatchdog();
     if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; }
     if (currentSource) { try { currentSource.stop(); } catch {} currentSource = null; }
@@ -1860,8 +1823,31 @@
     goLiveBtn.disabled = false;
   }
 
+  function scheduleLiveListeningRestart(delayMs = 300) {
+    clearLiveRestartTimer();
+    if (!liveActive || liveSubmitting) return;
+    liveRestartTimer = setTimeout(() => {
+      liveRestartTimer = null;
+      if (liveActive && !liveSubmitting && !liveListening) startLiveListening();
+    }, delayMs);
+  }
+
+  function stopLiveRecognition({ forceAbortAfterMs = 900 } = {}) {
+    clearLiveSilenceTimer();
+    if (!liveRecog) return;
+    const recog = liveRecog;
+    try { recog.stop(); } catch {}
+    if (forceAbortAfterMs > 0) {
+      setTimeout(() => {
+        if (liveRecog === recog && liveListening) {
+          try { recog.abort(); } catch {}
+        }
+      }, forceAbortAfterMs);
+    }
+  }
+
   function startLiveListening() {
-    if (!liveActive) return;
+    if (!liveActive || liveSubmitting || liveListening) return;
     dbg('live listening start');
     hideLiveWarn();
     setOrbState('listening');
@@ -1870,13 +1856,14 @@
       setOrbState('idle');
       liveTranscript.className = 'live-transcript empty';
       liveTranscript.textContent = 'Mikrofon blockiert. Bitte unten tippen oder Berechtigungen freigeben.';
-      liveFallbackInput?.focus();
+      liveManualInput?.focus();
       return;
     }
     liveRecog = new SRctor();
     liveRecog.continuous = true;
     liveRecog.interimResults = true;
     liveRecog.lang = selectedSpeechLang;
+    liveListening = true;
 
     liveBuffer = '';
     liveTranscript.className = 'live-transcript empty';
@@ -1891,7 +1878,7 @@
     audioStartWatchdog = setTimeout(() => {
       if (!liveActive) return;
       showLiveWarn('Dein Browser blockt die Spracherkennung. Bitte Chrome oder Edge nutzen — oder hier unten tippen.');
-      liveFallbackInput?.focus();
+      liveManualInput?.focus();
     }, AUDIOSTART_WATCHDOG_MS);
 
     liveRecog.onaudiostart = () => {
@@ -1925,12 +1912,13 @@
       clearLiveSilenceTimer();
       liveSilenceTimer = setTimeout(() => {
         if (liveActive && liveBuffer.trim().length > 1) {
-          try { liveRecog.stop(); } catch {}
+          stopLiveRecognition();
         }
       }, LIVE_SILENCE_MS);
     };
 
     liveRecog.onerror = (ev) => {
+      liveListening = false;
       if (ev.error === 'no-speech' || ev.error === 'aborted') return;
       if (ev.error === 'network') {
         showLiveWarn('Web-Speech-API offline — Spracherkennung braucht Internet. Weiter mit Tastatur unten.');
@@ -1938,20 +1926,25 @@
         showError(`Live mic: ${ev.error}`);
       }
       // try to recover
-      if (liveActive) setTimeout(() => startLiveListening(), 800);
+      scheduleLiveListeningRestart(800);
     };
 
     liveRecog.onend = async () => {
       clearLiveSilenceTimer();
       clearWatchdog();
+      liveListening = false;
+      liveRecog = null;
       if (!liveActive) return;
       dbg('live recognition end', { bufferedTextLength: liveBuffer.trim().length });
       if (liveBuffer.trim().length > 1) {
         await liveSubmit(liveBuffer.trim());
       } else {
-        // nothing captured — restart listening
-        dbg('live recognition restart: no text');
-        startLiveListening();
+        // Nothing captured. Stay idle instead of spinning forever in
+        // browser speech-recognition loops; the user can type below.
+        dbg('live recognition idle: no text');
+        setOrbState('idle');
+        liveTranscript.className = 'live-transcript empty';
+        liveTranscript.textContent = 'Keine Sprache erkannt. Bitte unten tippen.';
       }
     };
 
@@ -1961,7 +1954,10 @@
   }
 
   async function liveSubmit(text) {
-    if (!liveActive) return;
+    if (!liveActive || liveSubmitting) return;
+    liveSubmitting = true;
+    liveListening = false;
+    clearLiveRestartTimer();
     dbg('live submit start', {
       textLength: text.length,
       sessionId,
@@ -2083,30 +2079,15 @@
       });
       if (liveActive) {
         dbg('restart listening after playback');
-        startLiveListening();
+        liveSubmitting = false;
+        scheduleLiveListeningRestart(250);
       }
     } catch (e) {
       pending.remove();
       dbg('live submit stream error', e.message);
-      try {
-        showError('Streaming-TTS fehlgeschlagen, nutze Fallback …');
-        const d = await fetchConverseFallback(text);
-        sessionId = d.sessionId;
-        await waitForWrittenReplyDelay();
-        addMessage({
-          role: 'assistant',
-          text: d.responseText || '',
-          meta: `llama-3-3-70b → kugel-2 · <b>${d.processingTime}ms</b> · fallback`,
-        });
-        if (audioCtx?.state === 'suspended') {
-          try { await audioCtx.resume(); } catch {}
-        }
-        await playBase64Wav(d.audio);
-      } catch (fallbackErr) {
-        showError(fallbackErr.message || e.message);
-        dbg('live submit fallback error', fallbackErr.message || String(fallbackErr));
-      }
-      if (liveActive) setTimeout(() => startLiveListening(), 300);
+      showError(e.message);
+      liveSubmitting = false;
+      scheduleLiveListeningRestart(300);
     }
   }
 
@@ -2170,23 +2151,24 @@
   }
   lkProbeBtn?.addEventListener('click', lkProbe);
 
-  // Fallback typing inside the live overlay — works in browsers where
+  // Manual typing inside the live overlay — works in browsers where
   // Web Speech is blocked (Dia, Arc, etc.). Routes through the same
   // liveSubmit path so the agent answers via Kugel TTS just like voice.
-  async function liveFallbackSubmit() {
-    const text = liveFallbackInput?.value?.trim();
+  async function liveManualSubmit() {
+    const text = liveManualInput?.value?.trim();
     if (!text || !liveActive) return;
-    liveFallbackInput.value = '';
-    if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; }
+    liveManualInput.value = '';
+    if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; liveListening = false; }
     clearLiveSilenceTimer();
+    clearLiveRestartTimer();
     clearWatchdog();
     await liveSubmit(text);
   }
-  liveFallbackSend?.addEventListener('click', liveFallbackSubmit);
-  liveFallbackInput?.addEventListener('keydown', (e) => {
+  liveManualSend?.addEventListener('click', liveManualSubmit);
+  liveManualInput?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      liveFallbackSubmit();
+      liveManualSubmit();
     }
   });
   document.addEventListener('keydown', (e) => {
