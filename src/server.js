@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 import express from 'express';
-import { WebSocketServer } from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 import { createServer as createHttpServer } from 'http';
 import { createServer as createHttpsServer } from 'https';
 import { spawn, spawnSync } from 'child_process';
@@ -1258,6 +1258,75 @@ wss.on('connection', (ws, req) => {
     console.error(`[${sessionId}] WebSocket setup error:`, error);
     ws.close(1011, 'Internal server error');
   }
+});
+
+// ============================================================================
+// DEEPGRAM STT PROXY
+// ============================================================================
+
+const sttWss = new WebSocketServer({ noServer: true });
+
+httpServer.on('upgrade', (request, socket, head) => {
+  const { pathname } = new URL(request.url, `http://${request.headers.host}`);
+  if (pathname === '/stt') {
+    sttWss.handleUpgrade(request, socket, head, (ws) => {
+      sttWss.emit('connection', ws, request);
+    });
+  }
+});
+
+sttWss.on('connection', (ws) => {
+  const dgKey = process.env.DEEPGRAM_API_KEY;
+  if (!dgKey) {
+    ws.close(1011, 'DEEPGRAM_API_KEY not set');
+    return;
+  }
+
+  const dgUrl =
+    'wss://api.deepgram.com/v1/listen?' +
+    'model=nova-3&language=de&punctuate=true&interim_results=true' +
+    '&utterance_end_ms=1200&vad_events=true&encoding=linear16&sample_rate=16000';
+
+  const dgWs = new WebSocket(dgUrl, { headers: { Authorization: `Token ${dgKey}` } });
+
+  dgWs.on('open', () => {
+    console.log('[stt] deepgram connected');
+    ws.send(JSON.stringify({ type: 'ready' }));
+  });
+
+  dgWs.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'Results' && msg.channel?.alternatives?.[0]) {
+        const alt = msg.channel.alternatives[0];
+        ws.send(JSON.stringify({
+          type: 'transcript',
+          text: alt.transcript || '',
+          isFinal: msg.is_final === true,
+          speechFinal: msg.speech_final === true,
+        }));
+      } else if (msg.type === 'UtteranceEnd') {
+        ws.send(JSON.stringify({ type: 'utterance_end' }));
+      }
+    } catch {}
+  });
+
+  dgWs.on('close', () => {
+    if (ws.readyState <= 1) ws.close();
+  });
+
+  dgWs.on('error', (e) => {
+    console.error('[stt] deepgram error:', e.message);
+    if (ws.readyState <= 1) ws.close(1011, 'Deepgram error');
+  });
+
+  ws.on('message', (data) => {
+    if (dgWs.readyState === 1) dgWs.send(data);
+  });
+
+  ws.on('close', () => {
+    if (dgWs.readyState <= 1) dgWs.close();
+  });
 });
 
 // ============================================================================
