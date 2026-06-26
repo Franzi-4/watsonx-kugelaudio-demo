@@ -1114,94 +1114,94 @@
       });
   }
 
-  // Entry point for the hero "Gespräch starten" button. Opens the live overlay,
-  // plays the agent's greeting through the shared AudioContext, then hands off
-  // to the live-listening loop so the conversation is fully hands-free.
+  // Entry point for the hero "Gespräch starten" button. Connects to a
+  // LiveKit room; the server-side agent handles STT, LLM, and TTS —
+  // the browser just publishes its mic and plays the agent's audio track.
   async function startScenarioConversation() {
     const s = currentScenario();
     if (!s) return;
-    const ready = await ensureLiveReady();
-    if (!ready) return;
+    if (!window.LivekitClient) {
+      showError('LiveKit SDK nicht geladen — bitte Seite neu laden.');
+      return;
+    }
 
     liveActive = true;
     liveOverlay.classList.add('active');
     hideLiveWarn();
     setOrbState('speaking');
-    liveBuffer = '';
     liveTranscript.className = 'live-transcript';
-    liveTranscript.textContent = '';
+    liveTranscript.textContent = 'Verbinde …';
 
     try {
-      const startBody = { scenarioId: s.id, sessionId };
-      if (selectedVoiceId !== null && selectedVoiceId !== undefined) startBody.voiceId = selectedVoiceId;
-      startBody.mode = conversationMode;
-      // Streaming greeting — first audio chunk lands in ~500ms instead of
-      // ~1-3s, because we no longer block on the full TTS synthesis.
-      if (audioCtx && audioCtx.state === 'suspended') {
-        try { await audioCtx.resume(); } catch {}
-      }
-      resetPcmStream();
-      const r = await fetch('/api/scenario/start/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(startBody),
+      const roomName = `claims-${Date.now()}`;
+      const r = await fetch(`/api/livekit/token?room=${encodeURIComponent(roomName)}`);
+      if (!r.ok) throw new Error(`Token HTTP ${r.status}`);
+      const { url, token } = await r.json();
+
+      const { Room, RoomEvent } = window.LivekitClient;
+      if (lkRoom) { try { await lkRoom.disconnect(); } catch {} }
+      lkRoom = new Room({ adaptiveStream: false, dynacast: false });
+
+      // Agent audio arrives as a subscribed WebRTC track
+      lkRoom.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
+        if (track.kind === 'audio') {
+          const el = track.attach();
+          el.autoplay = true;
+          el.style.display = 'none';
+          document.body.appendChild(el);
+          lkAudioEls.push(el);
+          setOrbState('speaking');
+        }
       });
-      if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}`);
 
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let greeting = '';
-      let scenarioLabel = s.label;
-      let chunkCount = 0;
+      lkRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach().forEach(el => el.remove());
+      });
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let sep;
-        while ((sep = buf.indexOf('\n\n')) !== -1) {
-          const record = buf.slice(0, sep);
-          buf = buf.slice(sep + 2);
-          const lines = record.split('\n');
-          let event = 'message', data = '';
-          for (const line of lines) {
-            if (line.startsWith('event: ')) event = line.slice(7).trim();
-            else if (line.startsWith('data: ')) data += line.slice(6);
-          }
-          if (!data) continue;
-          let payload;
-          try { payload = JSON.parse(data); } catch { continue; }
-
-          if (event === 'session') {
-            sessionId = payload.sessionId;
-            greeting = payload.greeting || '';
-            scenarioLabel = payload.scenarioLabel || s.label;
-            thread.innerHTML = '';
-            addMessage({
-              role: 'assistant',
-              text: greeting,
-              meta: `${scenarioLabel} · Kugel Audio (stream)`,
-            });
-            liveTranscript.textContent = greeting;
-          } else if (event === 'audio') {
-            chunkCount++;
-            if (audioCtx?.state === 'suspended') {
-              try { await audioCtx.resume(); } catch {}
+      // Transcription events from the agent (STT results + agent responses)
+      lkRoom.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
+        for (const seg of segments) {
+          const text = seg.text || '';
+          if (!text.trim()) continue;
+          const isAgent = participant?.identity?.startsWith('agent');
+          if (isAgent) {
+            setOrbState('speaking');
+            liveTranscript.className = 'live-transcript';
+            liveTranscript.textContent = text;
+            if (seg.final) {
+              addMessage({ role: 'assistant', text, meta: 'gpt-oss-120b → kugel-1 · LiveKit' });
             }
-            await enqueuePcmChunk(payload.pcm, payload.sampleRate);
-          } else if (event === 'error') {
-            throw new Error(payload.message || 'stream error');
+          } else {
+            liveTranscript.className = 'live-transcript interim';
+            liveTranscript.textContent = text;
+            if (seg.final) {
+              addMessage({ role: 'user', text });
+              setOrbState('thinking');
+            }
           }
         }
+      });
+
+      lkRoom.on(RoomEvent.Disconnected, () => {
+        if (liveActive) liveStop();
+      });
+
+      await lkRoom.connect(url, token);
+      thread.innerHTML = '';
+
+      // Publish microphone
+      await lkRoom.localParticipant.setMicrophoneEnabled(true);
+      liveTranscript.textContent = 'Agent begrüßt Sie …';
+
+      // Start mic level meter
+      const micTracks = lkRoom.localParticipant.audioTrackPublications;
+      for (const [, pub] of micTracks) {
+        if (pub.track?.mediaStream) {
+          startMicMeter(pub.track.mediaStream);
+          break;
+        }
       }
-      console.log(`[greeting] received ${chunkCount} audio chunks`);
-      if (chunkCount === 0) throw new Error('stream greeting had zero audio chunks');
-      if (audioCtx?.state === 'suspended') {
-        try { await audioCtx.resume(); } catch {}
-      }
-      await pcmStreamFinished();
-      if (liveActive) startLiveListening();
+
     } catch (e) {
       showError(`Konnte Gespräch nicht starten: ${e.message}`);
       liveStop();
@@ -1698,8 +1698,19 @@
     return true;
   }
 
-  function startMicMeter() {
-    if (micMeterRaf) return;
+  function startMicMeter(stream) {
+    if (stream && !micAnalyser) {
+      if (!audioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new Ctx();
+      }
+      const source = audioCtx.createMediaStreamSource(stream);
+      micAnalyser = audioCtx.createAnalyser();
+      micAnalyser.fftSize = 512;
+      micAnalyser.smoothingTimeConstant = 0.6;
+      source.connect(micAnalyser);
+    }
+    if (micMeterRaf || !micAnalyser) return;
     const buf = new Uint8Array(micAnalyser.fftSize);
     const canvas = $('orbWave');
     const ctx = canvas?.getContext('2d');
@@ -1770,22 +1781,8 @@
   let lkRoom = null;
   const lkAudioEls = [];
 
-  async function liveStartSse() {
-    const ok = await ensureLiveReady();
-    if (!ok) return;
-    liveActive = true;
-    liveOverlay.classList.add('active');
-    liveBuffer = '';
-    hideLiveWarn();
-    liveTranscript.className = 'live-transcript empty';
-    liveTranscript.textContent = 'Sprechen Sie, um zu starten …';
-    startLiveListening();
-  }
-
   async function liveStart() {
-    // Default path for demos: full conversational loop (STT -> LLM -> TTS) via SSE.
-    // LiveKit stays available through the dedicated "LiveKit-Audio-Test" button.
-    await liveStartSse();
+    await startScenarioConversation();
   }
 
   function openLiveOverlayOnly() {
@@ -1801,13 +1798,6 @@
     liveActive = false;
     liveListening = false;
     liveSubmitting = false;
-    clearLiveSilenceTimer();
-    clearLiveRestartTimer();
-    clearWatchdog();
-    if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; }
-    if (currentSource) { try { currentSource.stop(); } catch {} currentSource = null; }
-    resetPcmStream();
-    if (liveAudio) { liveAudio.pause(); liveAudio.src = ''; liveAudio = null; }
     if (lkRoom) {
       try { lkRoom.disconnect(); } catch {}
       lkRoom = null;
@@ -1816,6 +1806,7 @@
       try { el.remove(); } catch {}
     }
     lkAudioEls.length = 0;
+    stopMicMeter();
     liveOverlay.classList.remove('active');
     hideLiveWarn();
     setOrbState('idle');
