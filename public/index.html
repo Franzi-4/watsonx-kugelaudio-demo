@@ -1500,7 +1500,7 @@
   //      so a brief network/TTS hiccup doesn't drain the queue.
   //   2. Cursor never trails currentTime — scheduling always pushes forward,
   //      so consecutive chunks line up sample-accurate on the audio clock.
-  const PCM_JITTER_MS = 220;
+  const PCM_JITTER_MS = 350;
   let pcmCursor = 0;                  // ctx-time at which the NEXT chunk should start
   let pcmPending = [];                // pre-jitter buffer (AudioBuffers waiting to start)
   let pcmStarted = false;
@@ -1849,6 +1849,7 @@
 
   let sttWs = null;
   let sttProcessor = null;
+  let sttAudioCtx = null;
 
   function startLiveListening() {
     if (!liveActive || liveSubmitting || liveListening) return;
@@ -1906,11 +1907,11 @@
   async function startMicStream() {
     try {
       if (!micStream) {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true } });
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
       }
-      const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      const source = ctx.createMediaStreamSource(micStream);
-      sttProcessor = ctx.createScriptProcessor(4096, 1, 1);
+      sttAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      const source = sttAudioCtx.createMediaStreamSource(micStream);
+      sttProcessor = sttAudioCtx.createScriptProcessor(4096, 1, 1);
       sttProcessor.onaudioprocess = (e) => {
         if (sttWs?.readyState === 1) {
           const float32 = e.inputBuffer.getChannelData(0);
@@ -1922,7 +1923,7 @@
         }
       };
       source.connect(sttProcessor);
-      sttProcessor.connect(ctx.destination);
+      sttProcessor.connect(sttAudioCtx.destination);
       startMicMeter(micStream);
     } catch (e) {
       showLiveWarn(`Mikrofon: ${e.message}. Bitte unten tippen.`);
@@ -1931,6 +1932,7 @@
 
   function stopMicStream() {
     if (sttProcessor) { try { sttProcessor.disconnect(); } catch {} sttProcessor = null; }
+    if (sttAudioCtx) { try { sttAudioCtx.close(); } catch {} sttAudioCtx = null; }
   }
 
   function stopLiveListening() {
