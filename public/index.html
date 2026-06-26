@@ -1617,20 +1617,17 @@
       pcmPending = [];
       pcmStarted = true;
     }
-    // Nothing was ever scheduled — return immediately.
     if (!pcmStarted) return Promise.resolve();
-    // All sources already ended before we got here — return immediately.
-    if (pcmActiveSources.size === 0) return Promise.resolve();
-    // Otherwise wait for the last source's onended callback.
+    const remaining = Math.max(0, pcmCursor - audioCtx.currentTime);
+    if (pcmActiveSources.size === 0 && remaining <= 0.01) return Promise.resolve();
     return new Promise((resolve) => {
       pcmDoneResolve = resolve;
-      // Safety timeout: if onended never fires (suspended context that never
-      // resumes), give up after the estimated remaining time + 2 s.
-      const remaining = Math.max(0, pcmCursor - audioCtx.currentTime);
-      dbg('pcmStreamFinished wait', { remainingMs: Math.round(remaining * 1000) });
+      dbg('pcmStreamFinished wait', { remainingMs: Math.round(remaining * 1000), activeSources: pcmActiveSources.size });
+      // Use cursor-based timeout — more reliable than onended events which
+      // can fire early if AudioContext gets suspended/resumed.
       setTimeout(() => {
         if (pcmDoneResolve) { pcmDoneResolve = null; resolve(); }
-      }, remaining * 1000 + 2000);
+      }, remaining * 1000 + 500);
     });
   }
 
@@ -1964,8 +1961,7 @@
     addMessage({ role: 'user', text });
     const pending = addMessage({ role: 'assistant', text: 'typing' });
 
-    // Streaming TTS: each `audio` event carries one PCM chunk that we
-    // schedule back-to-back on the AudioContext clock for gapless playback.
+    stopMicMeter();
     resetPcmStream();
     let speakingStarted = false;
     let streamDone = false;
