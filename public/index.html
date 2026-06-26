@@ -859,7 +859,7 @@
   <span class="label">stack</span>
   <span class="stack-item" id="s-orch"><span class="d"></span>watsonx Orchestrate</span>
   <span class="stack-sep">·</span>
-  <span class="stack-item" id="s-wx"><span class="d"></span>watsonx.ai / llama-3-3-70b</span>
+  <span class="stack-item" id="s-wx"><span class="d"></span>watsonx.ai / gpt-oss-120b</span>
   <span class="stack-sep">·</span>
   <span class="stack-item" id="s-gov"><span class="d"></span>watsonx.governance</span>
   <span class="stack-sep">·</span>
@@ -1372,7 +1372,7 @@
         role: 'assistant',
         text: d.responseText,
         audioUrl: `data:${d.audioMime};base64,${d.audio}`,
-        meta: `llama-3-3-70b · <b>${d.processingTime}ms</b> · ${d.sampleRate}Hz`,
+        meta: `gpt-oss-120b · <b>${d.processingTime}ms</b> · ${d.sampleRate}Hz`,
       });
     } catch (e) {
       pending.remove();
@@ -2046,7 +2046,7 @@
             fullTextSoFar = payload.responseText || fullTextSoFar;
             const llm = payload.llmMs != null ? ` · LLM <b>${payload.llmMs}ms</b>` : '';
             const ttfa = payload.ttsTtfa != null ? ` · TTS-TTFA <b>${payload.ttsTtfa}ms</b>` : '';
-            finalMeta = `llama-3-3-70b → kugel-2 · <b>${payload.processingTime}ms</b>${llm}${ttfa}`;
+            finalMeta = `gpt-oss-120b → kugel-2 · <b>${payload.processingTime}ms</b>${llm}${ttfa}`;
             streamDone = true;
             dbg('sse done', {
               processingTime: payload.processingTime,
@@ -2075,7 +2075,7 @@
       addMessage({
         role: 'assistant',
         text: fullTextSoFar.trim(),
-        meta: finalMeta || `llama-3-3-70b · streamed`,
+        meta: finalMeta || `gpt-oss-120b · streamed`,
       });
       if (liveActive) {
         dbg('restart listening after playback');
