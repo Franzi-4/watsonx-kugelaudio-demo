@@ -1588,7 +1588,7 @@
       if (buffered * 1000 < PCM_JITTER_MS) return;
       // Anchor the cursor a hair into the future so the first scheduled
       // start time is reachable, then drain the pre-buffer back-to-back.
-      pcmCursor = audioCtx.currentTime + 0.02;
+      pcmCursor = audioCtx.currentTime + 0.08;
       for (const buf of pcmPending) _scheduleAudioBuffer(buf);
       pcmPending = [];
       pcmStarted = true;
@@ -1612,7 +1612,7 @@
     if (!audioCtx) return Promise.resolve();
     // Flush any chunks that never crossed the jitter threshold (short response).
     if (!pcmStarted && pcmPending.length) {
-      pcmCursor = audioCtx.currentTime + 0.02;
+      pcmCursor = audioCtx.currentTime + 0.08;
       for (const buf of pcmPending) _scheduleAudioBuffer(buf);
       pcmPending = [];
       pcmStarted = true;
@@ -1903,18 +1903,25 @@
       if (!micStream) {
         micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
       }
-      sttAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      sttAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const actualRate = sttAudioCtx.sampleRate;
+      const targetRate = 16000;
+      const ratio = actualRate / targetRate;
+      dbg('mic stream', { actualRate, targetRate, ratio });
+
       const source = sttAudioCtx.createMediaStreamSource(micStream);
       sttProcessor = sttAudioCtx.createScriptProcessor(4096, 1, 1);
       sttProcessor.onaudioprocess = (e) => {
-        if (sttWs?.readyState === 1) {
-          const float32 = e.inputBuffer.getChannelData(0);
-          const int16 = new Int16Array(float32.length);
-          for (let i = 0; i < float32.length; i++) {
-            int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32768)));
-          }
-          sttWs.send(int16.buffer);
+        if (sttWs?.readyState !== 1) return;
+        const input = e.inputBuffer.getChannelData(0);
+        // Downsample to 16kHz
+        const outputLen = Math.floor(input.length / ratio);
+        const int16 = new Int16Array(outputLen);
+        for (let i = 0; i < outputLen; i++) {
+          const idx = Math.floor(i * ratio);
+          int16[i] = Math.max(-32768, Math.min(32767, Math.round(input[idx] * 32768)));
         }
+        sttWs.send(int16.buffer);
       };
       source.connect(sttProcessor);
       sttProcessor.connect(sttAudioCtx.destination);
