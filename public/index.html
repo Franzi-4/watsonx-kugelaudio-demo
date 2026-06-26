@@ -1929,8 +1929,11 @@
         }
         sttWs.send(int16.buffer);
       };
+      const silentGain = sttAudioCtx.createGain();
+      silentGain.gain.value = 0;
       source.connect(sttProcessor);
-      sttProcessor.connect(sttAudioCtx.destination);
+      sttProcessor.connect(silentGain);
+      silentGain.connect(sttAudioCtx.destination);
       startMicMeter(micStream);
     } catch (e) {
       showLiveWarn(`Mikrofon: ${e.message}. Bitte unten tippen.`);
