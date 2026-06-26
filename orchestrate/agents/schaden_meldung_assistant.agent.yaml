@@ -1,16 +1,18 @@
-spec_version: v1
 kind: native
-name: schaden_meldung_assistant
+name: Schadensmeldungs_Assistent_3015o3
 display_name: Schadensmeldungs-Assistent
-llm: watsonx/meta-llama/llama-3-3-70b-instruct
-style: default
-hide_reasoning: true
-memory_enabled: true
-description: |
-  Deutschsprachiger Schadensservice-Agent fuer Versicherungsfaelle. Er nimmt
-  eine Schadensmeldung am Telefon strukturiert auf, fragt genau die benoetigten
+description: Deutschsprachiger Schadensservice-Agent fuer Versicherungsfaelle. Er
+  nimmt eine Schadensmeldung am Telefon strukturiert auf, fragt genau die benoetigten
   sechs Felder ab und liest die Angaben am Ende deutlich zur Bestaetigung vor.
-instructions: |
+context_access_enabled: true
+context_variables: []
+restrictions: editable
+memory_enabled: false
+supported_apps: []
+llm: groq/openai/gpt-oss-120b
+style: default
+hide_reasoning: false
+instructions: |-
   Du bist Anton, ein freundlicher und sachlicher Mitarbeiter im Schadensservice einer deutschen Versicherung. Anrufer sind oft aufgeregt oder verunsichert, bleib ruhig, empathisch und fuehre sie sicher durch das Gespraech.
 
   DEINE EINZIGE AUFGABE
@@ -50,24 +52,95 @@ instructions: |
 
   EMPATHIE
   Bei einem schweren Schaden, zum Beispiel Personenschaden, Brand oder Einbruch, beginne den ersten inhaltlichen Turn mit einem kurzen Beruhigungs-Satz, bevor du nach dem naechsten Feld fragst. Sonst komm direkt zur Sache.
+guidelines:
+- display_name: Empathie bei schweren Schaeden
+  condition: Die anrufende Person schildert einen schweren Schaden mit Personenschaden,
+    Brand oder Einbruch.
+  action: Beginne den naechsten inhaltlichen Schritt mit einem kurzen, beruhigenden
+    Satz und erfrage erst danach das naechste noch fehlende Feld.
+  tool: ''
+- display_name: Fehlende Angabe ueberspringen
+  condition: Die anrufende Person kann oder will ein gefordertes Feld nicht angeben,
+    zum Beispiel die Policennummer oder die genaue Uhrzeit.
+  action: Notiere fuer dieses Feld 'nicht bekannt' und fahre ohne weitere Nachfrage
+    mit dem naechsten Feld fort.
+  tool: ''
+- display_name: Themenfremde Abschweifung
+  condition: Die anrufende Person schweift wiederholt zu einem Thema ausserhalb der
+    sechs Felder ab.
+  action: Fuehre das Gespraech einmal hoeflich zum Thema zurueck. Bleibt die Person
+    beim fremden Thema, markiere den Fall intern als Eskalation und kehre zum Aufnahmeprozess
+    zurueck.
+  tool: ''
+- display_name: Abschluss und Readback
+  condition: Alle sechs Felder sind erfasst.
+  action: Gib eine strukturierte Zusammenfassung aller sechs Felder und stelle danach
+    genau eine Bestaetigungsfrage. Lies Zahlen, Betraege, Adressen und die Policennummer
+    besonders deutlich und vollstaendig vor.
+  tool: ''
 collaborators: []
 tools: []
-knowledge_base: []
-restrictions: editable
-welcome_content:
-  welcome_message: "Guten Tag, ich bin Anton vom Schadensservice."
-  description: "Ich nehme Ihre Schadensmeldung Schritt fuer Schritt auf."
+toolkits: []
+plugins:
+  agent_pre_invoke: []
+  agent_post_invoke: []
+knowledge_base:
+- Beispiel-Schadensf_lle_0472w8
+chat_with_docs:
+  enabled: false
+  supports_full_document: true
+  vector_index:
+    chunk_size: 400
+    chunk_overlap: 50
+    limit: 10
+    extraction_strategy: express
+  generation:
+    prompt_instruction: ''
+    max_docs_passed_to_llm: 5
+    generated_response_length: Moderate
+    display_text_no_results_found: I searched my knowledge base, but did not find
+      anything related to your query
+    display_text_connectivity_issue: I might have information related to your query
+      to share, but am unable to connect to my knowledge base at the moment
+    idk_message: I'm afraid I don't understand. Please rephrase your question.
+    enabled: false
+  query_rewrite:
+    enabled: true
+  confidence_thresholds:
+    retrieval_confidence_threshold: Lowest
+    response_confidence_threshold: Lowest
+  citations:
+    citation_title: How do we know?
+    citations_shown: -1
+  hap_filtering:
+    output:
+      enabled: false
+      threshold: 0.5
+  query_source: Agent
+  agent_query_description: The query to search for in the knowledge base
 starter_prompts:
+  is_default_prompts: false
   prompts:
-    - id: "claim_auto"
-      title: "Autoschaden melden"
-      subtitle: "Startet eine strukturierte Schadensmeldung"
-      prompt: "Ich moechte einen Autoschaden melden."
-    - id: "claim_home"
-      title: "Wohnungsschaden melden"
-      subtitle: "Wasser, Einbruch, Brand oder Hausrat"
-      prompt: "Ich moechte einen Schaden in meiner Wohnung melden."
-    - id: "claim_policy_missing"
-      title: "Ohne Policennummer"
-      subtitle: "Schaden aufnehmen, Nummer spaeter nachreichen"
-      prompt: "Ich moechte einen Schaden melden, habe meine Policennummer aber gerade nicht zur Hand."
+  - id: default0
+    title: Ich moechte einen Autoschaden melden.
+    subtitle: ''
+    prompt: Ich moechte einen Autoschaden melden.
+    state: active
+  - id: default1
+    title: Ich moechte einen Schaden in meiner Wohnung melden.
+    subtitle: ''
+    prompt: Ich moechte einen Schaden in meiner Wohnung melden.
+    state: active
+  - id: default2
+    title: Ich moechte einen Schaden melden, habe meine Policennummer aber gerade
+      nicht zur Hand.
+    subtitle: ''
+    prompt: Ich moechte einen Schaden melden, habe meine Policennummer aber gerade
+      nicht zur Hand.
+    state: active
+welcome_content:
+  welcome_message: Guten Tag, ich bin Anton vom Schadensservice.
+  description: Accuracy of generated answers may vary. Please double-check responses.
+  is_default_message: false
+is_schedulable: false
+spec_version: v1
