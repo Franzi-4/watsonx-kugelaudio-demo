@@ -1289,8 +1289,8 @@ sttWss.on('connection', (ws) => {
 
   const dgUrl =
     'wss://api.deepgram.com/v1/listen?' +
-    'model=nova-2&language=de&punctuate=true&interim_results=true' +
-    '&utterance_end_ms=800&vad_events=true&encoding=linear16&sample_rate=16000';
+    'language=de&encoding=linear16&sample_rate=16000' +
+    '&punctuate=true&interim_results=true&endpointing=800';
 
   let dgWs;
   try {
@@ -1333,10 +1333,9 @@ sttWss.on('connection', (ws) => {
             isFinal: msg.is_final === true,
             speechFinal: msg.speech_final === true,
           }));
-        }
-      } else if (msg.type === 'UtteranceEnd') {
-        if (ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'utterance_end' }));
+          if (msg.speech_final && alt.transcript?.trim()) {
+            ws.send(JSON.stringify({ type: 'utterance_end' }));
+          }
         }
       }
     } catch (e) {
