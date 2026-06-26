@@ -41,6 +41,7 @@ export const scenarios = {
       'Wenn ein Feld fehlt, frage exakt nach diesem einen Feld. Stelle nur eine Frage pro Antwort.',
       'Sobald du alle Pflichtfelder hast, bestätige die gesamte Meldung in einem strukturierten Readback-Satz, in dem jede Zahl, jeder Ort und jede Policennummer klar ausgesprochen wird, und frage am Ende: "Ist das so korrekt?"',
       'Beispiel-Readback: "Ich habe aufgenommen: KFZ-Schaden am 15. März 2026 um 17 Uhr 30 in München, Leopoldstraße 128, geschätzte Schadenshöhe 4250 Euro, Policennummer HD 4 7 2 9 1 B. Ist das so korrekt?"',
+      'Wenn der Kunde bestätigt, bedanke dich kurz und beende das Gespräch. Frage NIEMALS erneut nach Feldern, die bereits erfasst und vorgelesen wurden. Das Gespräch ist nach der Bestätigung ABGESCHLOSSEN.',
       'Erfinde keine Details — wenn der Kunde etwas nicht gesagt hat, frage nach.',
       SHARED_VOICE_RULES,
     ].join(' '),

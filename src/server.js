@@ -85,14 +85,12 @@ const FAKE_AGENT_DELAY_ENABLED = parseBoolEnv('FAKE_AGENT_DELAY_ENABLED', true);
 const FAKE_AGENT_DELAY_CHANCE = Number.parseFloat(process.env.FAKE_AGENT_DELAY_CHANCE || '0.35');
 const FAKE_AGENT_DELAY_MIN_MS = parsePositiveIntEnv('FAKE_AGENT_DELAY_MIN_MS', 70);
 const FAKE_AGENT_DELAY_MAX_MS = parsePositiveIntEnv('FAKE_AGENT_DELAY_MAX_MS', 240);
-const PRE_SPEECH_DELAY_FIXED_MS = (process.env.PRE_SPEECH_DELAY_MS !== undefined)
-  ? parsePositiveIntEnv('PRE_SPEECH_DELAY_MS', 180)
-  : null;
-const PRE_SPEECH_DELAY_MIN_MS = parsePositiveIntEnv('PRE_SPEECH_DELAY_MIN_MS', 120);
-const PRE_SPEECH_DELAY_MAX_MS = parsePositiveIntEnv('PRE_SPEECH_DELAY_MAX_MS', 260);
-const PRE_SPEECH_DELAY_LONG_PAUSE_CHANCE = parseProbabilityEnv('PRE_SPEECH_DELAY_LONG_PAUSE_CHANCE', 0.22);
-const PRE_SPEECH_DELAY_LONG_PAUSE_MIN_MS = parsePositiveIntEnv('PRE_SPEECH_DELAY_LONG_PAUSE_MIN_MS', 80);
-const PRE_SPEECH_DELAY_LONG_PAUSE_MAX_MS = parsePositiveIntEnv('PRE_SPEECH_DELAY_LONG_PAUSE_MAX_MS', 220);
+const PRE_SPEECH_DELAY_FIXED_MS = 0;
+const PRE_SPEECH_DELAY_MIN_MS = 0;
+const PRE_SPEECH_DELAY_MAX_MS = 0;
+const PRE_SPEECH_DELAY_LONG_PAUSE_CHANCE = 0;
+const PRE_SPEECH_DELAY_LONG_PAUSE_MIN_MS = 0;
+const PRE_SPEECH_DELAY_LONG_PAUSE_MAX_MS = 0;
 const PSEUDO_DELTA_STREAM_ENABLED = parseBoolEnv('PSEUDO_DELTA_STREAM_ENABLED', true);
 const PSEUDO_DELTA_MIN_WORDS = parsePositiveIntEnv('PSEUDO_DELTA_MIN_WORDS', 1);
 const PSEUDO_DELTA_MAX_WORDS = parsePositiveIntEnv('PSEUDO_DELTA_MAX_WORDS', 4);
@@ -1289,7 +1287,7 @@ sttWss.on('connection', (ws) => {
   const dgUrl =
     'wss://api.deepgram.com/v1/listen?' +
     'model=nova-3&language=de&punctuate=true&interim_results=true' +
-    '&utterance_end_ms=1200&vad_events=true&encoding=linear16&sample_rate=16000';
+    '&utterance_end_ms=800&vad_events=true&encoding=linear16&sample_rate=16000';
 
   const dgWs = new WebSocket(dgUrl, { headers: { Authorization: `Token ${dgKey}` } });
 
