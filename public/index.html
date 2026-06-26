@@ -1500,7 +1500,7 @@
   //      so a brief network/TTS hiccup doesn't drain the queue.
   //   2. Cursor never trails currentTime — scheduling always pushes forward,
   //      so consecutive chunks line up sample-accurate on the audio clock.
-  const PCM_JITTER_MS = 350;
+  const PCM_JITTER_MS = 220;
   let pcmCursor = 0;                  // ctx-time at which the NEXT chunk should start
   let pcmPending = [];                // pre-jitter buffer (AudioBuffers waiting to start)
   let pcmStarted = false;
@@ -1679,12 +1679,7 @@
         }
       }
       if (micStream && !micAnalyser) {
-        const source = audioCtx.createMediaStreamSource(micStream);
-        micAnalyser = audioCtx.createAnalyser();
-        micAnalyser.fftSize = 512;
-        micAnalyser.smoothingTimeConstant = 0.6;
-        source.connect(micAnalyser);
-        startMicMeter();
+        startMicMeter(micStream);
       } else if (!micStream) {
         stopMicMeter();
       }
@@ -1696,14 +1691,14 @@
     return true;
   }
 
+  let micMeterCtx = null;
+
   function startMicMeter(stream) {
     if (stream && !micAnalyser) {
-      if (!audioCtx) {
-        const Ctx = window.AudioContext || window.webkitAudioContext;
-        audioCtx = new Ctx();
-      }
-      const source = audioCtx.createMediaStreamSource(stream);
-      micAnalyser = audioCtx.createAnalyser();
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      micMeterCtx = new Ctx();
+      const source = micMeterCtx.createMediaStreamSource(stream);
+      micAnalyser = micMeterCtx.createAnalyser();
       micAnalyser.fftSize = 512;
       micAnalyser.smoothingTimeConstant = 0.6;
       source.connect(micAnalyser);
@@ -1756,6 +1751,8 @@
 
   function stopMicMeter() {
     if (micMeterRaf) { cancelAnimationFrame(micMeterRaf); micMeterRaf = null; }
+    if (micAnalyser) { micAnalyser = null; }
+    if (micMeterCtx) { try { micMeterCtx.close(); } catch {} micMeterCtx = null; }
     liveOrb.style.setProperty('--mic-level', 0);
     if (micFill) micFill.style.width = '0%';
   }
