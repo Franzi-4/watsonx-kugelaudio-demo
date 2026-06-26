@@ -1903,19 +1903,18 @@
       if (!micStream) {
         micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
       }
-      micStream.getTracks().forEach(t => { t.enabled = true; });
       sttAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
       const actualRate = sttAudioCtx.sampleRate;
       const targetRate = 16000;
       const ratio = actualRate / targetRate;
-      dbg('mic stream', { actualRate, targetRate, ratio });
 
       const source = sttAudioCtx.createMediaStreamSource(micStream);
       sttProcessor = sttAudioCtx.createScriptProcessor(4096, 1, 1);
+      let skipFrames = 3;
       sttProcessor.onaudioprocess = (e) => {
+        if (skipFrames > 0) { skipFrames--; return; }
         if (sttWs?.readyState !== 1) return;
         const input = e.inputBuffer.getChannelData(0);
-        // Downsample to 16kHz
         const outputLen = Math.floor(input.length / ratio);
         const int16 = new Int16Array(outputLen);
         for (let i = 0; i < outputLen; i++) {
@@ -1929,6 +1928,7 @@
       source.connect(sttProcessor);
       sttProcessor.connect(silentGain);
       silentGain.connect(sttAudioCtx.destination);
+      micStream.getTracks().forEach(t => { t.enabled = true; });
       startMicMeter(micStream);
     } catch (e) {
       showLiveWarn(`Mikrofon: ${e.message}. Bitte unten tippen.`);
