@@ -1517,12 +1517,24 @@
     pcmStarted = false;
     pcmCursor = 0;
     pcmIsFirstChunk = true;
+    if (pcmGain) { pcmGain.gain.cancelScheduledValues(0); pcmGain.gain.value = 1; }
+  }
+
+  let pcmGain = null;
+
+  function _ensurePcmGain() {
+    if (!pcmGain || !audioCtx) {
+      pcmGain = audioCtx.createGain();
+      pcmGain.gain.value = 1;
+      pcmGain.connect(audioCtx.destination);
+    }
+    return pcmGain;
   }
 
   function _scheduleAudioBuffer(buffer) {
     const src = audioCtx.createBufferSource();
     src.buffer = buffer;
-    src.connect(audioCtx.destination);
+    src.connect(_ensurePcmGain());
     const safeNow = audioCtx.currentTime + 0.005; // 5ms scheduling safety
     const startAt = Math.max(pcmCursor, safeNow);
     dbg('pcm schedule', {
@@ -1620,6 +1632,12 @@
     if (!pcmStarted) return Promise.resolve();
     const remaining = Math.max(0, pcmCursor - audioCtx.currentTime);
     if (pcmActiveSources.size === 0 && remaining <= 0.01) return Promise.resolve();
+    // Schedule a short fade-out at the very end to prevent TTS cutoff click
+    if (pcmGain && remaining > 0.015) {
+      const fadeStart = audioCtx.currentTime + remaining - 0.012;
+      pcmGain.gain.setValueAtTime(1, fadeStart);
+      pcmGain.gain.linearRampToValueAtTime(0, fadeStart + 0.012);
+    }
     return new Promise((resolve) => {
       pcmDoneResolve = resolve;
       dbg('pcmStreamFinished wait', { remainingMs: Math.round(remaining * 1000), activeSources: pcmActiveSources.size });
