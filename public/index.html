@@ -1804,10 +1804,8 @@
     liveActive = false;
     liveListening = false;
     liveSubmitting = false;
-    clearLiveSilenceTimer();
     clearLiveRestartTimer();
-    clearWatchdog();
-    if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; }
+    stopLiveListening();
     if (currentSource) { try { currentSource.stop(); } catch {} currentSource = null; }
     resetPcmStream();
     if (liveAudio) { liveAudio.pause(); liveAudio.src = ''; liveAudio = null; }
@@ -1849,111 +1847,96 @@
     }
   }
 
+  let sttWs = null;
+  let sttProcessor = null;
+
   function startLiveListening() {
     if (!liveActive || liveSubmitting || liveListening) return;
-    dbg('live listening start');
+    dbg('live listening start (deepgram)');
     hideLiveWarn();
     setOrbState('listening');
-    if (micUnavailableReason) {
-      showLiveWarn(`${micUnavailableReason} Du kannst unten tippen.`);
-      setOrbState('idle');
-      liveTranscript.className = 'live-transcript empty';
-      liveTranscript.textContent = 'Mikrofon blockiert. Bitte unten tippen oder Berechtigungen freigeben.';
-      liveManualInput?.focus();
-      return;
-    }
-    liveRecog = new SRctor();
-    liveRecog.continuous = true;
-    liveRecog.interimResults = true;
-    liveRecog.lang = selectedSpeechLang;
     liveListening = true;
-
     liveBuffer = '';
     liveTranscript.className = 'live-transcript empty';
     liveTranscript.textContent = 'Ich höre zu …';
 
-    // Two-stage watchdog so we can differentiate the failure modes:
-    //   1) onaudiostart never fires (~2.5s) → the browser itself blocks the
-    //      Web Speech backend (Dia, Arc, Brave, Firefox). Tell user to type.
-    //   2) onaudiostart fires but no speech/result (~9s) → mic is alive but
-    //      not picking up words. Could be silent mic or noisy env.
-    clearWatchdog();
-    audioStartWatchdog = setTimeout(() => {
-      if (!liveActive) return;
-      showLiveWarn('Dein Browser blockt die Spracherkennung. Bitte Chrome oder Edge nutzen — oder hier unten tippen.');
-      liveManualInput?.focus();
-    }, AUDIOSTART_WATCHDOG_MS);
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    sttWs = new WebSocket(`${proto}://${location.host}/stt`);
 
-    liveRecog.onaudiostart = () => {
-      if (audioStartWatchdog) { clearTimeout(audioStartWatchdog); audioStartWatchdog = null; }
-      speechWatchdog = setTimeout(() => {
-        if (liveActive && !liveBuffer) {
-          showLiveWarn('Keine Sprache erkannt. Mikro-Pegel muss ausschlagen, wenn Sie sprechen.');
+    sttWs.onopen = async () => {
+      dbg('stt ws open — waiting for deepgram ready');
+    };
+
+    sttWs.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'ready') {
+          dbg('deepgram ready — starting mic stream');
+          startMicStream();
+        } else if (msg.type === 'transcript') {
+          hideLiveWarn();
+          if (msg.text) {
+            liveBuffer = msg.text;
+            liveTranscript.className = 'live-transcript' + (msg.isFinal ? '' : ' interim');
+            liveTranscript.textContent = msg.text;
+          }
+        } else if (msg.type === 'utterance_end') {
+          if (liveBuffer.trim().length > 1) {
+            stopLiveListening();
+            liveSubmit(liveBuffer.trim());
+          }
         }
-      }, SPEECH_WATCHDOG_MS);
+      } catch {}
     };
 
-    liveRecog.onspeechstart = () => { clearWatchdog(); hideLiveWarn(); };
+    sttWs.onerror = () => {
+      showLiveWarn('Spracherkennung fehlgeschlagen. Bitte unten tippen.');
+      liveListening = false;
+    };
 
-    liveRecog.onresult = (ev) => {
-      clearWatchdog();
-      hideLiveWarn();
-      let finalText = '';
-      let interimText = '';
-      for (let i = 0; i < ev.results.length; i++) {
-        const chunk = ev.results[i][0].transcript;
-        if (ev.results[i].isFinal) finalText += chunk;
-        else interimText += chunk;
+    sttWs.onclose = () => {
+      stopMicStream();
+      if (liveActive && !liveSubmitting && liveListening) {
+        liveListening = false;
+        scheduleLiveListeningRestart(500);
       }
-      const combined = (finalText + interimText).trim();
-      if (combined) {
-        liveBuffer = combined;
-        liveTranscript.className = 'live-transcript' + (interimText && !finalText ? ' interim' : '');
-        liveTranscript.textContent = combined;
+    };
+  }
+
+  async function startMicStream() {
+    try {
+      if (!micStream) {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true } });
       }
-      // (re)start the silence countdown on any new speech activity
-      clearLiveSilenceTimer();
-      liveSilenceTimer = setTimeout(() => {
-        if (liveActive && liveBuffer.trim().length > 1) {
-          stopLiveRecognition();
+      const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      const source = ctx.createMediaStreamSource(micStream);
+      sttProcessor = ctx.createScriptProcessor(4096, 1, 1);
+      sttProcessor.onaudioprocess = (e) => {
+        if (sttWs?.readyState === 1) {
+          const float32 = e.inputBuffer.getChannelData(0);
+          const int16 = new Int16Array(float32.length);
+          for (let i = 0; i < float32.length; i++) {
+            int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32768)));
+          }
+          sttWs.send(int16.buffer);
         }
-      }, LIVE_SILENCE_MS);
-    };
-
-    liveRecog.onerror = (ev) => {
-      liveListening = false;
-      if (ev.error === 'no-speech' || ev.error === 'aborted') return;
-      if (ev.error === 'network') {
-        showLiveWarn('Web-Speech-API offline — Spracherkennung braucht Internet. Weiter mit Tastatur unten.');
-      } else {
-        showError(`Live mic: ${ev.error}`);
-      }
-      // try to recover
-      scheduleLiveListeningRestart(800);
-    };
-
-    liveRecog.onend = async () => {
-      clearLiveSilenceTimer();
-      clearWatchdog();
-      liveListening = false;
-      liveRecog = null;
-      if (!liveActive) return;
-      dbg('live recognition end', { bufferedTextLength: liveBuffer.trim().length });
-      if (liveBuffer.trim().length > 1) {
-        await liveSubmit(liveBuffer.trim());
-      } else {
-        // Nothing captured. Stay idle instead of spinning forever in
-        // browser speech-recognition loops; the user can type below.
-        dbg('live recognition idle: no text');
-        setOrbState('idle');
-        liveTranscript.className = 'live-transcript empty';
-        liveTranscript.textContent = 'Keine Sprache erkannt. Bitte unten tippen.';
-      }
-    };
-
-    try { liveRecog.start(); } catch (e) {
-      showError(`Couldn't start listening: ${e.message}`);
+      };
+      source.connect(sttProcessor);
+      sttProcessor.connect(ctx.destination);
+      startMicMeter(micStream);
+    } catch (e) {
+      showLiveWarn(`Mikrofon: ${e.message}. Bitte unten tippen.`);
     }
+  }
+
+  function stopMicStream() {
+    if (sttProcessor) { try { sttProcessor.disconnect(); } catch {} sttProcessor = null; }
+  }
+
+  function stopLiveListening() {
+    liveListening = false;
+    if (sttWs) { try { sttWs.close(); } catch {} sttWs = null; }
+    stopMicStream();
   }
 
   async function liveSubmit(text) {
@@ -2160,10 +2143,7 @@
     const text = liveManualInput?.value?.trim();
     if (!text || !liveActive) return;
     liveManualInput.value = '';
-    if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; liveListening = false; }
-    clearLiveSilenceTimer();
-    clearLiveRestartTimer();
-    clearWatchdog();
+    stopLiveListening();
     await liveSubmit(text);
   }
   liveManualSend?.addEventListener('click', liveManualSubmit);
