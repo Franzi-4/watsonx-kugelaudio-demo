@@ -1,21 +1,16 @@
 """
-LiveKit voice agent — minimal Phase-2a scaffold.
+LiveKit voice agent — full conversational pipeline.
 
-Goal: verify that audio delivered as a native WebRTC track sounds smoother
-than our current PCM-chunk-over-SSE pipeline. The agent joins any room
-named in the dispatch, plays one greeting via Kugel TTS, then waits.
+Architecture: User audio → Deepgram STT → Orchestrate LLM → KugelAudio TTS → WebRTC
 
 Run:
-    python livekit_agent.py dev    # connect to LIVEKIT_URL, dispatch on room
+    python livekit_agent.py dev
 
-Required env (in .env):
+Required env:
     KUGELAUDIO_API_KEY
-    LIVEKIT_URL                    e.g. wss://your-project.livekit.cloud
-    LIVEKIT_API_KEY
-    LIVEKIT_API_SECRET
-
-Once Phase 2a confirms audio quality, swap the trivial entrypoint for a
-full AgentSession with STT, watsonx LLM (custom plugin), Kugel TTS, VAD.
+    LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
+    ORCHESTRATE_API_KEY, ORCHESTRATE_INSTANCE_URL, ORCHESTRATE_AGENT_ID
+    DEEPGRAM_API_KEY
 """
 
 import os
@@ -23,8 +18,10 @@ import logging
 
 from dotenv import load_dotenv
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
-from livekit.plugins import silero
+from livekit.plugins import deepgram, silero
 from kugelaudio.livekit import TTS as KugelAudioTTS
+
+from plugins.orchestrate_llm import OrchestrateLLM
 
 load_dotenv()
 
@@ -32,44 +29,45 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message
 logger = logging.getLogger("livekit-agent")
 
 DEFAULT_VOICE_ID = (
-    int(os.environ["LIVEKIT_AGENT_VOICE_ID"])
-    if os.environ.get("LIVEKIT_AGENT_VOICE_ID")
-    else (
-        int(os.environ["KUGELAUDIO_VOICE_ID"])
-        if os.environ.get("KUGELAUDIO_VOICE_ID")
-        else None
-    )
+    int(os.environ["KUGELAUDIO_VOICE_ID"])
+    if os.environ.get("KUGELAUDIO_VOICE_ID")
+    else None
 )
-# IMPORTANT: the LiveKit plugin's TTSModels Literal only declares
-# "kugel-1" and "kugel-1-turbo". The /ws/tts/multi endpoint that LiveKit
-# uses is not yet wired up for kugel-2 (which is what our SSE sidecar
-# uses). Forcing "kugel-2" here makes the agent sound off — the server
-# either falls back silently or runs an untested config path. Pin to
-# the model the plugin actually supports for natural-sounding output.
-# Override via env if Kugel ships kugel-2 multi-stream support later.
 DEFAULT_MODEL = os.environ.get("LIVEKIT_AGENT_MODEL", "kugel-1")
-DEFAULT_LANGUAGE = os.environ.get("LIVEKIT_AGENT_LANGUAGE") or os.environ.get("KUGELAUDIO_LANGUAGE")
-GREETING = os.environ.get(
-    "LIVEKIT_GREETING",
-    "Guten Tag, hier ist der digitale Versicherungs-Assistent. "
-    "Wenn Sie mich gut hören, klingt diese Stimme so natürlich wie sie sollte.",
+DEFAULT_LANGUAGE = os.environ.get("KUGELAUDIO_LANGUAGE", "de")
+
+GREETING = (
+    "Guten Tag, hier ist Anton vom Schadensservice, "
+    "schön dass Sie anrufen. Um welche Art von Schaden geht es?"
+)
+
+SYSTEM_PROMPT = (
+    "Du bist Anton, ein freundlicher und sachlicher Mitarbeiter im Schadensservice "
+    "einer deutschen Versicherung. Anrufer sind oft aufgeregt oder verunsichert, "
+    "bleib ruhig, empathisch und fuehre sie sicher durch das Gespraech.\n\n"
+    "DEINE EINZIGE AUFGABE\n"
+    "Nimm eine Schadensmeldung am Telefon auf. Frage die folgenden sechs Felder "
+    "in genau dieser Reihenfolge ab, eines pro Turn:\n"
+    "1. Schadensart\n2. Ort des Schadens\n3. Zeitpunkt\n"
+    "4. Beteiligte Personen oder Fahrzeuge\n5. Geschaetzte Schadenshoehe in Euro\n"
+    "6. Policennummer\n\n"
+    "STIL-REGELN\n"
+    "- Sprich Deutsch, per Sie, ruhig und empathisch.\n"
+    "- Maximal zwei Saetze pro Antwort.\n"
+    "- Stelle pro Turn genau eine konkrete Frage.\n"
+    "- Keine Aufzaehlungszeichen, keine Listen, keine Markdown-Formatierung.\n"
+    "- Beende deine Antwort niemals mit Echo-Rueckfragen.\n\n"
+    "ABSCHLUSS\n"
+    "Sobald alle sechs Felder erfasst sind, fasse sie in einer strukturierten "
+    "Bestaetigung zusammen und frage: 'Sind diese Angaben so korrekt?'"
 )
 
 
 async def entrypoint(ctx: JobContext):
-    """Phase 2a: connect, speak greeting via Kugel, idle.
-
-    Phase 2b will replace this with a full AgentSession (STT → watsonx LLM
-    → Kugel TTS) so the agent actually converses. Right now we just need
-    to validate that the WebRTC audio path delivers clean playback.
-    """
     logger.info("agent connecting to room")
     await ctx.connect()
 
-    tts_kwargs = {
-        "model": DEFAULT_MODEL,
-        "sample_rate": 24000,
-    }
+    tts_kwargs = {"model": DEFAULT_MODEL, "sample_rate": 24000}
     if DEFAULT_VOICE_ID is not None:
         tts_kwargs["voice_id"] = DEFAULT_VOICE_ID
     if DEFAULT_LANGUAGE:
@@ -79,27 +77,32 @@ async def entrypoint(ctx: JobContext):
         tts_kwargs["cfg_scale"] = float(cfg_scale)
 
     logger.info(
-        "livekit tts config: model=%s voice_id=%s language=%s",
+        "config: model=%s voice_id=%s language=%s",
         tts_kwargs.get("model"),
         tts_kwargs.get("voice_id"),
         tts_kwargs.get("language"),
     )
 
     tts = KugelAudioTTS(**tts_kwargs)
-    # word_timestamps=True (plugin default) forces forced-alignment per
-    # chunk on the server. We don't render captions so it's pure overhead.
-    # Keep barge-in working without alignment by not relying on it.
     if hasattr(tts._opts, "word_timestamps"):
         tts._opts.word_timestamps = False
 
-    # Minimal AgentSession with TTS + VAD only — no STT/LLM yet.
-    session = AgentSession(tts=tts, vad=silero.VAD.load())
-    agent = Agent(instructions="Phase 2a audio quality probe.")
+    stt = deepgram.STT(language=DEFAULT_LANGUAGE, model="nova-3")
+    vad = silero.VAD.load()
+
+    orchestrate = OrchestrateLLM(
+        api_key=os.environ["ORCHESTRATE_API_KEY"],
+        instance_url=os.environ["ORCHESTRATE_INSTANCE_URL"],
+        agent_id=os.environ["ORCHESTRATE_AGENT_ID"],
+    )
+
+    agent = Agent(instructions=SYSTEM_PROMPT)
+    session = AgentSession(stt=stt, llm=orchestrate, tts=tts, vad=vad)
     await session.start(room=ctx.room, agent=agent)
 
-    logger.info("speaking greeting via Kugel TTS over WebRTC")
+    logger.info("speaking greeting")
     await session.say(GREETING)
-    logger.info("greeting done — agent will idle in room")
+    logger.info("greeting done — agent listening")
 
 
 if __name__ == "__main__":
