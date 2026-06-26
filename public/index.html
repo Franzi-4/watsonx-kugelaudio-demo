@@ -2071,7 +2071,7 @@
       if (liveActive) {
         dbg('restart listening after playback');
         liveSubmitting = false;
-        scheduleLiveListeningRestart(250);
+        scheduleLiveListeningRestart(600);
       }
     } catch (e) {
       pending.remove();
