@@ -2142,18 +2142,22 @@
   }
   lkProbeBtn?.addEventListener('click', lkProbe);
 
-  // Manual typing inside the live overlay — works in browsers where
-  // Web Speech is blocked (Dia, Arc, etc.). Routes through the same
-  // liveSubmit path so the agent answers via Kugel TTS just like voice.
+  // Manual typing inside the live overlay — sends text via LiveKit
+  // data channel so the server-side agent processes it like STT input.
   async function liveManualSubmit() {
     const text = liveManualInput?.value?.trim();
     if (!text || !liveActive) return;
     liveManualInput.value = '';
-    if (liveRecog) { try { liveRecog.abort(); } catch {} liveRecog = null; liveListening = false; }
-    clearLiveSilenceTimer();
-    clearLiveRestartTimer();
-    clearWatchdog();
-    await liveSubmit(text);
+    if (lkRoom && lkRoom.localParticipant) {
+      const encoder = new TextEncoder();
+      await lkRoom.localParticipant.publishData(
+        encoder.encode(JSON.stringify({ type: 'text_input', text })),
+        { reliable: true }
+      );
+      addMessage({ role: 'user', text });
+      setOrbState('thinking');
+      liveTranscript.textContent = text;
+    }
   }
   liveManualSend?.addEventListener('click', liveManualSubmit);
   liveManualInput?.addEventListener('keydown', (e) => {
