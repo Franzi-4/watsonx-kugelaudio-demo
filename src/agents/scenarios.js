@@ -29,6 +29,7 @@ export const scenarios = {
     description:
       'Der Agent nimmt eine KFZ-, Hausrat- oder Haftpflicht-Schadensmeldung auf, extrahiert Schadensart, Ort, Zeit, Beteiligte, Schadenshöhe und Policennummer — und liest die Daten zur Bestätigung strukturiert zurück.',
     defaultLanguage: 'de',
+    greeting: 'Guten Tag, hier ist Anton vom Schadensservice, schön dass Sie anrufen. Um welche Art von Schaden geht es?',
     suggestions: [
       'Ich hatte gestern gegen 17 Uhr 30 einen Auffahrunfall in München, Leopoldstraße 128. Meine Policennummer ist HD 4 7 2 9 1 B.',
       'Bei mir zuhause ist ein Wasserschaden entstanden, Schätzung 4250 Euro, Hausratversicherung Nummer HV 9 9 8 2 7 3.',

@@ -531,19 +531,27 @@ async function buildScenarioOpening(scenario, { sessionId, conversationMode = 'f
 }
 
 async function prefetchScenarioOpening(scenarioId, voiceId, conversationMode = 'free') {
-  const configError = requireOrchestrate();
-  if (configError) throw new Error(configError.message);
   const scenario = getScenario(scenarioId);
   const mode = normalizeConversationMode(conversationMode);
   const existing = getFreshOpeningPrefetch(scenario.id, voiceId, mode);
   if (existing) return { ...existing, cacheHit: true };
 
   const language = scenario.defaultLanguage || 'de';
-  const opening = await buildScenarioOpening(scenario, {
-    sessionId: `prefetch_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
-    conversationMode: mode,
-  });
-  const openingText = opening.text;
+  let openingText;
+  let threadId = null;
+  if (scenario.greeting) {
+    openingText = scenario.greeting;
+  } else {
+    const configError = requireOrchestrate();
+    if (configError) throw new Error(configError.message);
+    const opening = await buildScenarioOpening(scenario, {
+      sessionId: `prefetch_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+      conversationMode: mode,
+    });
+    openingText = opening.text;
+    threadId = opening.threadId;
+  }
+
   const ttsOpts = voicePipeline.ttsOptions(language);
   const chunks = [];
 
@@ -567,7 +575,7 @@ async function prefetchScenarioOpening(scenarioId, voiceId, conversationMode = '
     scenarioId: scenario.id,
     language,
     greeting: openingText,
-    threadId: opening.threadId,
+    threadId,
     audioChunks: chunks,
     usedVoiceId: ttsResult.usedVoiceId,
     createdAt: Date.now(),
@@ -638,14 +646,23 @@ app.post('/api/scenario/start/stream', async (req, res) => {
       conversationMode,
     });
     const prefetched = consumeOpeningPrefetch(scenario.id, effectiveVoiceId, conversationMode);
-    const opening = prefetched
-      ? { text: prefetched.greeting, threadId: prefetched.threadId }
-      : await buildScenarioOpening(scenario, {
-          sessionId,
-          conversationMode,
-        });
-    const greeting = opening.text;
-    if (opening.threadId) session.orchestrateThreadId = opening.threadId;
+    let greeting;
+    if (prefetched) {
+      greeting = prefetched.greeting;
+      if (prefetched.threadId) {
+        session.orchestrateThreadId = prefetched.threadId;
+      } else {
+        // Boot-prefetch has no Orchestrate thread — start one in the background
+        // so subsequent user turns have a conversation context.
+        buildScenarioOpening(scenario, { sessionId, conversationMode })
+          .then((bg) => { if (bg.threadId) session.orchestrateThreadId = bg.threadId; })
+          .catch((e) => console.warn(`[scenario/start] background thread init failed: ${e.message}`));
+      }
+    } else {
+      const opening = await buildScenarioOpening(scenario, { sessionId, conversationMode });
+      greeting = opening.text;
+      if (opening.threadId) session.orchestrateThreadId = opening.threadId;
+    }
 
     send('session', {
       sessionId,
@@ -1429,11 +1446,47 @@ httpServer.listen(PORT, HOST, () => {
   startTtsSidecar();
   startLivekitAgent();
 
-  // Poll briefly so the boot log makes it obvious whether TTS is ready.
+  // Poll until TTS sidecar is ready, then pre-synthesize the greeting.
   (async () => {
     for (let i = 0; i < 30; i++) {
       if (await kugelAudioClient.sidecarHealthy()) {
         console.log('[tts sidecar] reachable on', kugelAudioClient.sidecarUrl);
+        // Pre-synthesize the hardcoded greeting at boot so it's instant
+        // when the user clicks "Gespräch starten".
+        try {
+          const scenario = getScenario(DEFAULT_SCENARIO_ID);
+          if (scenario.greeting && voicePipeline) {
+            const language = scenario.defaultLanguage || 'de';
+            const ttsOpts = voicePipeline.ttsOptions(language);
+            const chunks = [];
+            await streamTtsWithVoice(scenario.greeting, {
+              voiceId: DEFAULT_TTS_VOICE_ID,
+              language: ttsOpts.language,
+              cfgScale: ttsOpts.cfgScale,
+              normalize: ttsOpts.normalize,
+              logTag: 'boot/greeting',
+              onAudio: ({ pcm, sampleRate, samples }) => {
+                chunks.push({ pcm: pcm.toString('base64'), sampleRate, samples, encoding: 'pcm_s16le' });
+              },
+            });
+            const key = openingPrefetchKey(scenario.id, DEFAULT_TTS_VOICE_ID, 'orchestrate');
+            openingPrefetchCache.set(key, {
+              scenarioId: scenario.id,
+              language,
+              greeting: scenario.greeting,
+              threadId: null,
+              audioChunks: chunks,
+              usedVoiceId: DEFAULT_TTS_VOICE_ID,
+              createdAt: Date.now(),
+              expiresAt: Date.now() + OPENING_PREFETCH_TTL_MS,
+              cacheHit: false,
+              bootPrefetch: true,
+            });
+            console.log(`[boot] greeting pre-synthesized (${chunks.length} chunks)`);
+          }
+        } catch (e) {
+          console.warn(`[boot] greeting pre-synthesis failed: ${e.message}`);
+        }
         return;
       }
       await new Promise((r) => setTimeout(r, 500));
