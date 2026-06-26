@@ -1588,7 +1588,7 @@
       if (buffered * 1000 < PCM_JITTER_MS) return;
       // Anchor the cursor a hair into the future so the first scheduled
       // start time is reachable, then drain the pre-buffer back-to-back.
-      pcmCursor = audioCtx.currentTime + 0.08;
+      pcmCursor = audioCtx.currentTime + 0.2;
       for (const buf of pcmPending) _scheduleAudioBuffer(buf);
       pcmPending = [];
       pcmStarted = true;
@@ -1612,7 +1612,7 @@
     if (!audioCtx) return Promise.resolve();
     // Flush any chunks that never crossed the jitter threshold (short response).
     if (!pcmStarted && pcmPending.length) {
-      pcmCursor = audioCtx.currentTime + 0.08;
+      pcmCursor = audioCtx.currentTime + 0.2;
       for (const buf of pcmPending) _scheduleAudioBuffer(buf);
       pcmPending = [];
       pcmStarted = true;
