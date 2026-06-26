@@ -266,8 +266,8 @@ function requireOrchestrate() {
   };
 }
 
-// Initialize WebSocket server
-const wss = new WebSocketServer({ server: httpServer });
+// Initialize WebSocket servers (noServer mode — routed via upgrade handler below)
+const wss = new WebSocketServer({ noServer: true });
 wss.on('error', (error) => {
   if (error?.code === 'EADDRINUSE') return;
   console.error('WebSocket server error:', error);
@@ -1271,6 +1271,10 @@ httpServer.on('upgrade', (request, socket, head) => {
   if (pathname === '/stt') {
     sttWss.handleUpgrade(request, socket, head, (ws) => {
       sttWss.emit('connection', ws, request);
+    });
+  } else {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
     });
   }
 });
