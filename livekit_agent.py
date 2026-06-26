@@ -13,10 +13,12 @@ Required env:
     DEEPGRAM_API_KEY
 """
 
+import json
 import os
 import logging
 
 from dotenv import load_dotenv
+from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
 from livekit.plugins import deepgram, silero
 from kugelaudio.livekit import TTS as KugelAudioTTS
@@ -63,6 +65,19 @@ SYSTEM_PROMPT = (
 )
 
 
+async def _handle_text_input(session: AgentSession, orchestrate: OrchestrateLLM, text: str):
+    """Process manually typed text through the LLM and speak the response."""
+    from livekit.agents import llm
+    chat_ctx = llm.ChatContext()
+    chat_ctx.add_message(role="system", content=SYSTEM_PROMPT)
+    chat_ctx.add_message(role="user", content=text)
+    stream = orchestrate.chat(chat_ctx=chat_ctx)
+    response = await stream.collect()
+    reply = response.text or ""
+    if reply:
+        await session.say(reply)
+
+
 async def entrypoint(ctx: JobContext):
     logger.info("agent connecting to room")
     await ctx.connect()
@@ -99,6 +114,17 @@ async def entrypoint(ctx: JobContext):
     agent = Agent(instructions=SYSTEM_PROMPT)
     session = AgentSession(stt=stt, llm=orchestrate, tts=tts, vad=vad)
     await session.start(room=ctx.room, agent=agent)
+
+    # Handle manual text input via data channel — process through LLM like STT would
+    @ctx.room.on("data_received")
+    def on_data(data: rtc.DataPacket):
+        try:
+            msg = json.loads(data.data.decode("utf-8"))
+            if msg.get("type") == "text_input" and msg.get("text"):
+                import asyncio
+                asyncio.ensure_future(_handle_text_input(session, orchestrate, msg["text"]))
+        except Exception as e:
+            logger.warning("data_received parse error: %s", e)
 
     logger.info("speaking greeting")
     await session.say(GREETING)
