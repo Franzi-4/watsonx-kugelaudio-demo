@@ -1903,6 +1903,7 @@
       if (!micStream) {
         micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
       }
+      micStream.getTracks().forEach(t => { t.enabled = true; });
       sttAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
       const actualRate = sttAudioCtx.sampleRate;
       const targetRate = 16000;
@@ -1972,6 +1973,7 @@
     const pending = addMessage({ role: 'assistant', text: 'typing' });
 
     stopMicMeter();
+    if (micStream) micStream.getTracks().forEach(t => { t.enabled = false; });
     resetPcmStream();
     let speakingStarted = false;
     let streamDone = false;
