@@ -13,7 +13,6 @@ This package provides a complete voice pipeline that:
 - **Synthesizes responses** with natural voice cloning
 - **Streams audio back** in real-time
 
-Perfect for building customer service agents, support bots, and multilingual voice applications.
 
 ## Prerequisites
 
@@ -21,7 +20,6 @@ Perfect for building customer service agents, support bots, and multilingual voi
 - **Python 3.11-3.13** for the watsonx Orchestrate ADK
 - **KugelAudio API credentials** (API key and endpoint)
 - **IBM watsonx Orchestrate credentials** (Orchestrate API key, instance URL, agent ID)
-- **Optional:** Salesforce integration for CRM lookup
 
 ## Quick Start
 
@@ -435,78 +433,6 @@ ws.on_message = on_message
 ws.run_forever()
 ```
 
-## Production Considerations
-
-### Performance
-
-- Average latency: 39ms per speech segment
-- Supports concurrent sessions with proper scaling
-- WebSocket connection pooling recommended
-- Consider load balancing for multiple instances
-
-### Security
-
-- Always use HTTPS/WSS in production
-- Validate API credentials in environment variables
-- Implement rate limiting per session
-- Add authentication middleware for REST endpoints
-- Log all interactions for compliance
-
-### Scaling
-
-- Use a reverse proxy (nginx) for load balancing
-- Deploy multiple server instances
-- Consider message queue for high-volume scenarios
-- Monitor memory usage during long sessions
-- Implement session cleanup after timeout
-
-### Monitoring
-
-- Track session duration and message count
-- Monitor API response times
-- Alert on service health check failures
-- Log all errors and exceptions
-- Review escalation triggers
-
-## Troubleshooting
-
-### API Authentication Fails
-
-- Verify credentials in `.env`
-- Check token expiration for watsonx
-- Confirm API keys are not rotated
-
-### Audio Quality Issues
-
-- Check audio input sample rate (16kHz recommended)
-- Verify audio format (WAV recommended)
-- Adjust chunk size in voice pipeline
-- Test with known-good audio samples
-
-### WebSocket Connection Drops
-
-- Implement reconnection logic on client
-- Check firewall/proxy settings
-- Verify WebSocket support enabled
-- Monitor server memory and connections
-
-### Language Detection Fails
-
-- Ensure minimum audio duration (1+ second)
-- Verify audio quality and noise levels
-- Check supported language codes
-- Test with reference language
-
-## License
-
-MIT
-
-## Support
-
-For issues or questions:
-- Check logs with `LOG_LEVEL=debug`
-- Review API documentation at respective vendor sites
-- Run health check endpoint: `GET /api/health`
 
 ## Related Documentation
 
