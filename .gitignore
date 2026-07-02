@@ -5,6 +5,9 @@ smoke.mjs
 *.log
 .DS_Store
 
+# Local dev certs
+.cert/
+
 # Local dev tooling — Claude Code state, Python venv for TTS sidecar
 .claude/
 .venv-tts/
